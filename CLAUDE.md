@@ -55,16 +55,15 @@ When implementing, **match the behavior of these files exactly** for Phases 4a/4
 
 ## External Dependencies (from the broader project)
 
-The package imports from `Shared.Common`, which is outside this repository:
+The package imports from `RemondoPythonCore.Common`, which is outside this repository:
 
 ```python
-from Shared.Common.General_Utilities   import padding, cropping
-from Shared.Common.PSF_Preprocessing  import psf_preprocess, condition_psf
-from Shared.Common.Image_Preprocessing import (image_normalization, validate_image,
-                                                to_grayscale, odd_crop_around_center)
+from RemondoPythonCore.Common.General_Utilities   import padding, cropping, odd_crop_around_center
+from RemondoPythonCore.Common.PSF_Preprocessing  import psf_preprocess, condition_psf
+from RemondoPythonCore.Common.Image_Preprocessing import image_normalization, validate_image, to_grayscale
 ```
 
-These are assumed to exist and work correctly. Do NOT reimplement them. If writing tests that need to run standalone (without `Shared.Common`), create mock/stub versions in `tests/conftest.py`.
+These are assumed to exist and work correctly. Do NOT reimplement them. If writing tests that need to run standalone (without `RemondoPythonCore.Common`), create mock/stub versions in `tests/conftest.py`.
 
 ## Coding Conventions
 
@@ -121,7 +120,7 @@ pytest tests/ -v
 ```
 
 ### Test structure:
-- `tests/conftest.py` — shared fixtures (synthetic images, Gaussian PSFs, mock Shared.Common utilities)
+- `tests/conftest.py` — shared fixtures (synthetic images, Gaussian PSFs, mock RemondoPythonCore.Common utilities)
 - `tests/test_backend.py` — Phase 1 verification
 - `tests/test_tv_operators.py` — Phase 2 verification (adjointness, prox identity, denoising)
 - `tests/test_base.py` — Phase 3 verification (constructor, shapes, mask, HTM floor)
