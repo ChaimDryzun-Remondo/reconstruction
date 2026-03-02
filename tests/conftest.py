@@ -124,11 +124,12 @@ def _mock_odd_crop_around_center(image: np.ndarray,
 
 
 def _install_mocks() -> None:
-    """Inject mock Shared.Common modules into sys.modules."""
+    """Inject mock Shared.Common and RemondoPythonCore.Common modules into sys.modules."""
     # Only install mocks if the real modules are not available.
     if "Shared.Common.General_Utilities" in sys.modules:
         return
 
+    # ── Shared.Common.* ───────────────────────────────────────────────────
     shared = types.ModuleType("Shared")
     shared.__path__ = []
     common = types.ModuleType("Shared.Common")
@@ -153,6 +154,35 @@ def _install_mocks() -> None:
     sys.modules["Shared.Common.General_Utilities"] = gen_utils
     sys.modules["Shared.Common.PSF_Preprocessing"] = psf_pre
     sys.modules["Shared.Common.Image_Preprocessing"] = img_pre
+
+    # ── RemondoPythonCore.Common.* ────────────────────────────────────────
+    # The reference Wiener.py (docs/reference/) imports from this path.
+    # Provide identical stubs so regression tests can load the reference.
+    if "RemondoPythonCore.Common.General_Utilities" not in sys.modules:
+        rpc = types.ModuleType("RemondoPythonCore")
+        rpc.__path__ = []
+        rpc_common = types.ModuleType("RemondoPythonCore.Common")
+        rpc_common.__path__ = []
+
+        rpc_gen_utils = types.ModuleType("RemondoPythonCore.Common.General_Utilities")
+        rpc_gen_utils.padding = _mock_padding
+        rpc_gen_utils.cropping = _mock_cropping
+        rpc_gen_utils.odd_crop_around_center = _mock_odd_crop_around_center
+
+        rpc_psf_pre = types.ModuleType("RemondoPythonCore.Common.PSF_Preprocessing")
+        rpc_psf_pre.psf_preprocess = _mock_psf_preprocess
+        rpc_psf_pre.condition_psf = _mock_condition_psf
+
+        rpc_img_pre = types.ModuleType("RemondoPythonCore.Common.Image_Preprocessing")
+        rpc_img_pre.image_normalization = _mock_image_normalization
+        rpc_img_pre.validate_image = _mock_validate_image
+        rpc_img_pre.to_grayscale = _mock_to_grayscale
+
+        sys.modules["RemondoPythonCore"] = rpc
+        sys.modules["RemondoPythonCore.Common"] = rpc_common
+        sys.modules["RemondoPythonCore.Common.General_Utilities"] = rpc_gen_utils
+        sys.modules["RemondoPythonCore.Common.PSF_Preprocessing"] = rpc_psf_pre
+        sys.modules["RemondoPythonCore.Common.Image_Preprocessing"] = rpc_img_pre
 
 
 # Install mocks at import time (before any Reconstruction imports).
