@@ -24,7 +24,8 @@ dev = [
     "pytest>=7.0",
     "pytest-cov",
 ]
-all = ["reconstruction[gpu,imaging,dev]"]
+pnp = ["bm3d>=4.0"]
+all = ["reconstruction[gpu,imaging,dev,pnp]"]
 
 [tool.setuptools.packages.find]
 include = ["Reconstruction*"]
