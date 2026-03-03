@@ -30,6 +30,70 @@ Reconstruction/
 
 **Key design principle**: All algorithms inherit from `DeconvBase`. The base class owns the entire forward-model setup (image preprocessing, padding, mask, PSF FFT, H^T M precomputation). Algorithm subclasses implement only `deblur()`.
 
+## Solver Architecture
+
+All iterative deconvolution solvers share a single boundary abstraction:
+
+**Extended canvas + operator H via FFT + mask M for data fidelity.**
+
+- Work on an extended canvas: original FOV plus a guard band (sized by
+  padding_scale × PSF size, inherited from DeconvBase).
+- y is the observed image embedded into the canvas (padded exterior).
+- M is a binary mask on the canvas: 1 inside the original FOV, 0 in the
+  guard band.
+- H is convolution with the PSF via circular FFT on the full canvas.
+- Data fidelity is computed only on measured pixels:
+
+      min_x  D(M ⊙ (Hx), M ⊙ y) + λ R(x)
+
+  where D is the data-fit term (L2, Poisson, etc.) and R is the
+  regularizer (TV, sparsity, denoiser prior, etc.).
+
+**Padding + taper is used ONLY for single-pass linear deconvolution**
+(e.g., Wiener). Iterative methods propagate information into the guard
+band through the regularizer and PSF coupling — taper is unnecessary
+and counterproductive.
+
+**ADMM-type solvers use the v = Hx variable split.** This cleanly
+separates masked data fidelity (handled in the pointwise v-update) from
+the FFT-diagonalizable linear x-update:
+
+  Introduce v = Hx and solve:
+    min_{x,v}  (1/2)||M ⊙ (v - y)||² + λ R(x)   s.t. v = Hx
+
+  ADMM steps:
+  - v-update (pointwise, closed form):
+      v ← (M ⊙ y + ρ_v (Hx - d_v)) / (M + ρ_v)
+    Inside FOV (M=1): weighted average of data and prediction.
+    Outside FOV (M=0): v = Hx - d_v (no data constraint).
+
+  - x-update (FFT-friendly, with w = ∇x split for TV):
+      (ρ_v |H|² + ρ_w |∇|²) x̂ = ρ_v H* (v̂+d̂_v) + ρ_w ∇̂^T(w-d_w)
+    Pointwise division in Fourier domain — exact, one FFT pair.
+
+  - w-update (TV proximal / shrinkage):
+      Vectorial soft-thresholding on ∇x + d_w.
+
+**Boundary conditions for TV operators:**
+
+Two BC variants exist in _tv_operators.py, used by different algorithms:
+
+- Neumann BC (forward_grad / backward_div): Zero-flux at boundaries.
+  Used by proximal TV solvers (Chambolle dual projection in FISTA/Landweber)
+  and by the Dey et al. multiplicative TV correction in RL. The Chambolle
+  solver is self-contained — its internal BC do not need to match the
+  outer algorithm's FFT structure.
+
+- Periodic BC (forward_grad_periodic / backward_div_periodic): Wrap-around
+  at boundaries. REQUIRED by any algorithm that diagonalizes ∇^T∇ in the
+  Fourier domain, because the DFT eigenvalues
+  4 - 2cos(2πf_y) - 2cos(2πf_x) are derived under periodic BC. Used by
+  TVAL3 and ADMM x-updates.
+
+This is not a contradiction — it reflects two different mathematical
+requirements. The canvas+mask layer is universal; the TV operator BC is
+algorithm-specific.
+
 ## Implementation Plan
 
 The full specification is in `docs/RECONSTRUCTION_SPEC.py`. Implementation follows 7 phases in strict order:
@@ -158,3 +222,13 @@ This is a satellite imaging project. Key concepts:
 5. **Float32 precision**: accumulation errors grow over hundreds of iterations. Epsilon values must be `xp.float32` scalars, not Python floats, to avoid silent promotion to float64.
 6. **The `_freeze` function** marks arrays as read-only. Precomputed arrays (PF, conjPF, HTM, mask) should always be frozen to catch accidental mutation.
 7. **CuPy memory**: explicitly `del` large temporaries and call `cp.get_default_memory_pool().free_all_blocks()` if memory is tight.
+8. **Periodic vs Neumann BC must match the algorithm's math.** If the
+   algorithm solves a linear system in the Fourier domain using lap_fft
+   eigenvalues, the gradient/divergence MUST use periodic BC. If the
+   algorithm uses a standalone proximal TV solver (Chambolle), Neumann BC
+   is standard. Mixing them silently degrades convergence and introduces
+   boundary artifacts.
+9. **The v=Hx split is required for masked ADMM.** Never try to put
+   the mask M inside the FFT-domain x-update — M is not shift-invariant
+   and breaks the diagonalization. Always split v=Hx so the mask stays
+   in the pointwise v-update.

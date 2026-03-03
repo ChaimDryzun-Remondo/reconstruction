@@ -15,7 +15,9 @@ import pytest
 import Reconstruction._backend as backend
 from Reconstruction._tv_operators import (
     backward_div,
+    backward_div_periodic,
     forward_grad,
+    forward_grad_periodic,
     prox_tv_chambolle,
     tv_multiplicative_correction,
 )
@@ -258,3 +260,119 @@ class TestTVMultiplicativeCorrection:
         correction = tv_multiplicative_correction(x, lambda_tv=0.01)
         assert correction.shape == (33, 57)
         assert float(np.min(correction)) >= 0.5
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. Periodic BC — adjointness, wrapping, consistency
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPeriodicBC:
+    """
+    Verify forward_grad_periodic / backward_div_periodic.
+
+    Tests:
+      - Adjointness: ⟨−∇_per x, p⟩ = ⟨x, div_per(p)⟩ for random arrays.
+      - Wrapping: last row of dh and last col of dw are non-zero for generic x.
+      - Consistency: for a constant input, periodic and Neumann gradients agree.
+      - Interior matching: interior rows/cols match the Neumann operator.
+      - Shape: output shapes equal the input shape.
+    """
+
+    def test_periodic_adjointness_64x64(self):
+        """⟨−∇_per x, p⟩ ≈ ⟨x, div_per(p)⟩  for random 64×64 float64."""
+        rng = np.random.default_rng(20)
+        x   = rng.random((64, 64))
+        p_h = rng.random((64, 64))
+        p_w = rng.random((64, 64))
+
+        dh, dw = forward_grad_periodic(x)
+
+        lhs = float(np.sum(-dh * p_h) + np.sum(-dw * p_w))
+        rhs = float(np.sum(x * backward_div_periodic(p_h, p_w)))
+
+        assert abs(lhs - rhs) < 1e-5, (
+            f"Periodic adjointness violated: |lhs − rhs| = {abs(lhs - rhs):.3e} "
+            f"(lhs={lhs:.6f}, rhs={rhs:.6f})"
+        )
+
+    def test_periodic_adjointness_non_square(self):
+        """Adjointness holds for a non-square array (33×47)."""
+        rng = np.random.default_rng(21)
+        x   = rng.random((33, 47))
+        p_h = rng.random((33, 47))
+        p_w = rng.random((33, 47))
+
+        dh, dw = forward_grad_periodic(x)
+        lhs = float(np.sum(-dh * p_h) + np.sum(-dw * p_w))
+        rhs = float(np.sum(x * backward_div_periodic(p_h, p_w)))
+
+        assert abs(lhs - rhs) < 1e-5, (
+            f"Non-square periodic adjointness failed: |lhs − rhs| = {abs(lhs - rhs):.3e}"
+        )
+
+    def test_periodic_wraps_last_row(self):
+        """dh[-1, :] = x[0, :] − x[-1, :] (wrap-around, not zero)."""
+        rng = np.random.default_rng(22)
+        x = rng.random((16, 16)).astype(np.float32)
+        dh, _ = forward_grad_periodic(x)
+
+        expected_wrap = x[0, :] - x[-1, :]
+        np.testing.assert_allclose(
+            dh[-1, :], expected_wrap, atol=1e-6,
+            err_msg="Last row of dh should wrap: x[0,:] − x[-1,:]"
+        )
+
+    def test_periodic_wraps_last_col(self):
+        """dw[:, -1] = x[:, 0] − x[:, -1] (wrap-around, not zero)."""
+        rng = np.random.default_rng(23)
+        x = rng.random((16, 16)).astype(np.float32)
+        _, dw = forward_grad_periodic(x)
+
+        expected_wrap = x[:, 0] - x[:, -1]
+        np.testing.assert_allclose(
+            dw[:, -1], expected_wrap, atol=1e-6,
+            err_msg="Last col of dw should wrap: x[:,0] − x[:,-1]"
+        )
+
+    def test_neumann_last_row_is_zero(self):
+        """Confirm Neumann last-row is zero to contrast with periodic wrap."""
+        rng = np.random.default_rng(24)
+        x = rng.random((16, 16)).astype(np.float32)
+        dh_n, _ = forward_grad(x)
+        np.testing.assert_array_equal(
+            dh_n[-1, :], np.zeros(16, dtype=np.float32),
+            err_msg="Neumann last row should be zero (contrast with periodic)"
+        )
+
+    def test_periodic_interior_matches_neumann(self):
+        """Interior rows/cols are identical for periodic and Neumann operators."""
+        rng = np.random.default_rng(25)
+        x = rng.random((32, 32)).astype(np.float32)
+
+        dh_n,  dw_n  = forward_grad(x)
+        dh_p,  dw_p  = forward_grad_periodic(x)
+
+        # All rows except last, all cols except last
+        np.testing.assert_array_equal(dh_p[:-1, :], dh_n[:-1, :])
+        np.testing.assert_array_equal(dw_p[:, :-1], dw_n[:, :-1])
+
+    def test_constant_image_periodic_grad_is_zero(self):
+        """forward_grad_periodic on a constant image gives all-zero gradients."""
+        x = np.full((16, 16), 0.5, dtype=np.float32)
+        dh, dw = forward_grad_periodic(x)
+        np.testing.assert_array_equal(dh, np.zeros_like(x))
+        np.testing.assert_array_equal(dw, np.zeros_like(x))
+
+    def test_periodic_grad_shape(self):
+        """forward_grad_periodic returns two arrays with the same shape as x."""
+        x = np.ones((17, 23), dtype=np.float32)
+        dh, dw = forward_grad_periodic(x)
+        assert dh.shape == (17, 23)
+        assert dw.shape == (17, 23)
+
+    def test_backward_div_periodic_shape(self):
+        """backward_div_periodic returns an array with the same shape as its inputs."""
+        p_h = np.ones((17, 23), dtype=np.float32)
+        p_w = np.ones((17, 23), dtype=np.float32)
+        div = backward_div_periodic(p_h, p_w)
+        assert div.shape == (17, 23)

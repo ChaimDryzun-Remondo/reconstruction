@@ -87,6 +87,86 @@
 #     # ══════════════════════════════════════════════════════════════════
 #     # Section Title
 #     # ══════════════════════════════════════════════════════════════════
+#
+#
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 2.7:  SOLVER BOUNDARY ABSTRACTION
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# All iterative deconvolution solvers share a single boundary abstraction:
+#
+#   Extended canvas + operator H via FFT + mask M for data fidelity.
+#
+# CANVAS + MASK LAYER (universal):
+#   - Work on an extended canvas: original FOV plus a guard band
+#     (sized by padding_scale × PSF size, inherited from DeconvBase).
+#   - y is the observed image embedded into the canvas (padded exterior).
+#   - M is a binary mask on the canvas: 1 inside the original FOV,
+#     0 in the guard band.
+#   - H is convolution with the PSF via circular FFT on the full canvas.
+#   - Data fidelity is computed only on measured pixels:
+#
+#       min_x  D(M ⊙ (Hx), M ⊙ y)  +  λ R(x)
+#
+#     where D is the data-fit term (L2, Poisson, etc.) and R is the
+#     regularizer (TV, sparsity, denoiser prior, etc.).
+#
+# PADDING + TAPER:
+#   Used ONLY for single-pass linear deconvolution (e.g., Wiener).
+#   Iterative methods propagate information into the guard band through
+#   the regularizer and PSF coupling — taper is unnecessary and
+#   counterproductive for iterative solvers.
+#
+# V = HX VARIABLE SPLIT (required for masked ADMM-type solvers):
+#   Introduce v = Hx and solve:
+#     min_{x,v}  (1/2)||M ⊙ (v − y)||²  +  λ R(x)   s.t. v = Hx
+#
+#   This cleanly separates masked data fidelity (handled in the pointwise
+#   v-update) from the FFT-diagonalizable linear x-update.
+#
+#   ADMM steps:
+#   - v-update (pointwise, closed form):
+#       v ← (M ⊙ y  +  ρ_v (Hx − d_v)) / (M + ρ_v)
+#     Inside FOV (M=1): weighted average of data and prediction.
+#     Outside FOV (M=0): v = Hx − d_v  (no data constraint).
+#
+#   - x-update (FFT-friendly, with w = ∇x split for TV):
+#       (ρ_v |H|²  +  ρ_w |∇|²) x̂  =  ρ_v H*(v̂ + d̂_v)
+#                                      +  ρ_w ∇̂^T(w − d_w)
+#     Pointwise division in Fourier domain — exact, one FFT pair.
+#     |∇|² in Fourier domain = 4 − 2cos(2πf_y) − 2cos(2πf_x)
+#     (eigenvalues of -∇^T∇ under PERIODIC BC — see note below).
+#
+#   - w-update (TV proximal / shrinkage):
+#       Vectorial soft-thresholding on (∇x + d_w).
+#       w_{k+1} = shrink(∇x + d_w, λ/ρ_w)
+#
+#   - Dual updates:
+#       d_v ← d_v + Hx − v_{k+1}
+#       d_w ← d_w + ∇x − w_{k+1}
+#
+#   NOTE: M is not shift-invariant — NEVER put M inside the FFT-domain
+#   x-update.  The v=Hx split is the standard workaround that keeps the
+#   x-update diagonalizable in the Fourier domain.
+#
+# BOUNDARY CONDITIONS FOR TV OPERATORS:
+#   Two BC variants in _tv_operators.py serve different algorithmic roles:
+#
+#   - Neumann BC (forward_grad / backward_div):
+#       Zero-flux at boundaries.  Used by proximal TV solvers (Chambolle
+#       dual projection in FISTA/Landweber) and the Dey et al. multiplicative
+#       TV correction in RL.  The Chambolle solver is self-contained — its
+#       internal BC do not need to match the outer algorithm's FFT structure.
+#
+#   - Periodic BC (forward_grad_periodic / backward_div_periodic):
+#       Wrap-around at boundaries.  REQUIRED by any algorithm that
+#       diagonalizes ∇^T∇ in the Fourier domain.  The DFT eigenvalues
+#       4 − 2cos(2πf_y) − 2cos(2πf_x) are derived under periodic BC.
+#       Used by TVAL3 and ADMM x-updates.
+#
+#   This is not a contradiction — it reflects two different mathematical
+#   requirements.  The canvas+mask layer is universal; the TV operator BC
+#   is algorithm-specific.
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -805,46 +885,58 @@
 # ═════════════════════════════════════════════════════════════════════════════
 #
 # PURPOSE:
-#   ADMM (Alternating Direction Method of Multipliers) for TV-regularized
-#   deconvolution with unknown boundaries.
+#   Three-block ADMM (v=Hx split) for TV-regularized deconvolution with
+#   unknown boundaries.  Uses the v=Hx variable split from Section 2.7
+#   so that the mask stays in the pointwise v-update and the x-update
+#   remains exactly diagonalizable in the Fourier domain.
 #
 # MATHEMATICAL FORMULATION:
-#   We solve:
-#     min_x  (1/2) ||M(Hx − y)||² + λ TV(x)
+#   Introduce v = Hx and w = ∇x:
+#     min_{x,v,w}  (1/2)||M ⊙ (v − y)||²  +  λ ||w||_{2,1}
+#     subject to   v = Hx,   w = ∇x
 #
-#   Introduce auxiliary variable z = ∇x and write as:
-#     min_{x,z}  (1/2) ||M(Hx − y)||² + λ ||z||_{2,1}
-#     subject to  z = ∇x
+#   Augmented Lagrangian (ρ_v for v-constraint, ρ_w for w-constraint):
+#     L = (1/2)||M⊙(v-y)||² + λ||w||_{2,1}
+#       + (ρ_v/2)||Hx - v + d_v||² + (ρ_w/2)||∇x - w + d_w||²
 #
-#   Where ||z||_{2,1} = Σ_{i,j} sqrt(z_h² + z_w²)  (isotropic TV).
+#   ADMM iterates (three blocks: v, w, x):
+#     v-update:  v ← (M ⊙ y  +  ρ_v (Hx − d_v)) / (M + ρ_v)    [pointwise]
+#     w-update:  w ← shrink(∇x + d_w,  λ/ρ_w)                    [pointwise]
+#     x-update:  (ρ_v|H|² + ρ_w|∇|²) x̂ = ρ_v H*(v̂ + d̂_v)
+#                                         + ρ_w ∇̂^T(ŵ − d̂_w)    [FFT, exact]
+#     Dual:      d_v ← d_v + Hx − v
+#                d_w ← d_w + ∇x − w
 #
-#   Augmented Lagrangian with penalty ρ:
-#     L(x, z, u) = (1/2)||M(Hx-y)||² + λ||z||_{2,1}
-#                  + (ρ/2)||∇x - z + u||² - (ρ/2)||u||²
-#
-#   ADMM iterates:
-#     x-update:  x_{k+1} = argmin_x (1/2)||M(Hx-y)||² + (ρ/2)||∇x - z_k + u_k||²
-#     z-update:  z_{k+1} = prox_{(λ/ρ) || · ||_{2,1}}(∇x_{k+1} + u_k)
-#     u-update:  u_{k+1} = u_k + ∇x_{k+1} - z_{k+1}
+#   |∇|² Fourier eigenvalues (periodic BC):
+#     D_lap[k,l] = 4 − 2cos(2πk/H) − 2cos(2πl/W)
+#     (precomputed once at construction, full M×N grid, NOT rfft2)
 #
 # ─────────────────────────────────────────────────────────────────────────
 # FILE: Reconstruction/admm.py
 # ─────────────────────────────────────────────────────────────────────────
 #
 # IMPORTS:
-#   from ._backend import xp, rfft2, irfft2
+#   from ._backend import xp, fft2, ifft2, rfft2, irfft2, fftfreq
 #   from ._base import DeconvBase
-#   from ._tv_operators import forward_grad, backward_div
+#   from ._tv_operators import forward_grad_periodic, backward_div_periodic
 #
 # CLASS: ADMMDeconv(DeconvBase)
 #
-#   __init__: NO OVERRIDE (inherits mask support from base).
+#   __init__: OVERRIDE to precompute D_lap.
+#     After super().__init__(), compute:
+#       ky = fftfreq(H) * 2π  (shape H)
+#       kx = fftfreq(W) * 2π  (shape W)
+#       D_lap = 4 − 2cos(ky[:, None]) − 2cos(kx[None, :])  (shape H×W)
+#       self.D_lap = _freeze(D_lap.astype(xp.float32))
+#     NOTE: D_lap is on the full M×N grid (not rfft2 half-grid) because
+#     it must match the full complex fft2/ifft2 used in the x-update.
 #
 #   def deblur(
 #       self,
 #       num_iter: int = 100,
 #       lambda_tv: float = 0.001,
-#       rho: float = 1.0,
+#       rho_v: float = 1.0,
+#       rho_w: float = 1.0,
 #       tol: float = 1e-6,
 #       min_iter: int = 5,
 #       check_every: int = 5,
@@ -854,64 +946,68 @@
 #
 #   ALGORITHM:
 #
-#   PRECOMPUTATION:
-#     The x-update requires solving a linear system.  In the frequency
-#     domain (using the masked formulation), this becomes:
+#   PRECOMPUTATION (once before loop):
+#     PF_full = fft2(ifftshift(psf_pad))          # full complex OTF, shape H×W
+#     conjPF_full = conj(PF_full)
+#     PF2_full = |PF_full|²
+#     x_denom = rho_v * PF2_full + rho_w * D_lap  # denominator, shape H×W
+#     (Use rfft2/irfft2 for Hx and H^T computations — they are cheaper.)
 #
-#       x_{k+1} = F^{-1} [ (H* · F[M · (M·Hx_{rhs})] + ρ · F[div(z_k - u_k)])
-#                           / (|H|² · F[M] * F[M] + ρ · D_lap) ]
+#   INITIALIZATION:
+#     x = self.estimated_image.copy()  (shape H×W on canvas)
+#     v_d, w_h, w_w, d_v, d_wh, d_ww = zeros_like(x)
 #
-#     HOWEVER, the mask M makes this non-diagonal in the frequency domain
-#     (M is not shift-invariant).  The standard workaround is to use the
-#     LINEARIZED ADMM (also called split Bregman) approach:
+#   PER-ITERATION:
 #
-#     Replace the exact x-minimization with a single gradient step:
-#       gradient of data fidelity: H^T[M(Hx_k - y)]
-#       gradient of augmented term: -ρ · div(∇x_k - z_k + u_k)
-#       x_{k+1} = x_k - τ [H^T[M(Hx_k - y)] - ρ · div(∇x_k - z_k + u_k)]
+#   v-update (pointwise):
+#     Hx  = irfft2(PF * rfft2(x), s=fshape)
+#     v   = (M * y + rho_v * (Hx - d_v)) / (M + rho_v)
 #
-#     Where τ is a step size (use τ = 1 / (L + ρ · 8), where
-#     L = Lipschitz of data fidelity, 8 = ||∇||²_op for 2D).
+#   w-update (vectorial soft-thresholding):
+#     gh, gw = forward_grad_periodic(x)
+#     vh = gh + d_wh;  vw = gw + d_ww
+#     mag = sqrt(vh² + vw²)
+#     shrink_factor = max(mag - lambda_tv/rho_w, 0) / max(mag, eps)
+#     w_h = shrink_factor * vh;  w_w = shrink_factor * vw
 #
-#   z-UPDATE (vectorial soft-thresholding / shrinkage):
-#     v_h, v_w = forward_grad(x_{k+1}) + u_h_k, u_w_k
-#     mag = sqrt(v_h² + v_w²)
-#     shrink = max(mag - λ/ρ, 0) / max(mag, eps)
-#     z_h_{k+1} = shrink * v_h
-#     z_w_{k+1} = shrink * v_w
+#   x-update (exact FFT solve):
+#     rhs_v = rho_v * irfft2(conjPF * rfft2(v + d_v), s=fshape)
+#     rhs_w = rho_w * backward_div_periodic(w_h - d_wh, w_w - d_ww)
+#     rhs = rhs_v + rhs_w
+#     x_new = ifft2(fft2(rhs) / x_denom).real  (shape H×W)
 #
-#     This is the proximal operator of (λ/ρ)||·||_{2,1}, applied
-#     pointwise to the 2-vector (v_h, v_w) at each pixel.
+#   Dual updates:
+#     d_v  += Hx_new − v
+#     gh_new, gw_new = forward_grad_periodic(x_new)
+#     d_wh += gh_new − w_h
+#     d_ww += gw_new − w_w
 #
-#   u-UPDATE (dual variable / scaled residual):
-#     dx_h, dx_w = forward_grad(x_{k+1})
-#     u_h_{k+1} = u_h_k + dx_h - z_h_{k+1}
-#     u_w_{k+1} = u_w_k + dx_w - z_w_{k+1}
+#   Positivity (optional):
+#     xp.maximum(x_new, eps_pos, out=x_new)
 #
-#   CONVERGENCE: Same self._check_convergence on x_new vs x_k.
+#   CONVERGENCE: self._check_convergence(x_new, x, k=k, ...)
 #
-#   IMPORTANT NOTES for implementation:
-#   - z and u are 2-component vector fields: store as (z_h, z_w) and
-#     (u_h, u_w), each shape (H, W).  Initialize all to zero.
-#   - Positivity can be enforced after the x-update (it's a projection
-#     onto a convex set, compatible with ADMM).
-#   - ρ controls convergence speed vs. accuracy of the splitting:
-#     too small → slow, too large → noisy.  ρ = 1.0 is a reasonable
-#     default; consider adaptive ρ (Boyd et al. 2011) for production.
+#   IMPORTANT NOTES:
+#   - Use forward_grad_periodic / backward_div_periodic for the TV terms
+#     (needed for the Fourier-domain x-update).
+#   - Use rfft2/irfft2 for the data term (cheaper, real-valued).
+#   - The x-update denominator is real-valued (rho_v*|H|² + rho_w*D_lap).
+#   - rho_v = rho_w = 1.0 is a reasonable default.
 #
 #   REFERENCES:
 #   [1] S. Boyd et al., "Distributed Optimization and Statistical Learning
 #       via the Alternating Direction Method of Multipliers," Found. and
 #       Trends in Machine Learning, 3(1):1–122, 2011.
+#   [2] See Section 2.7 for the v=Hx split rationale.
 #
-# WRAPPER: admm_deblur(image, psf, iters=100, ...)
+# WRAPPER: admm_deblur(image, psf, ...)
 #
 # ─── VERIFICATION (Phase 5c) ───────────────────────────────────────────
 #   1. Same blurred test image.
 #   2. Run ADMM for 100 iterations with lambda_tv=0.001.
 #   3. Verify output PSNR is reasonable (> 20 dB).
 #   4. Verify PSNR improves over Wiener baseline.
-#   5. Verify z and u residuals decrease (primal/dual residual check).
+#   5. Verify primal and dual residuals decrease monotonically.
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -956,7 +1052,8 @@
 #
 #   ALGORITHM:
 #
-#   The TVAL3 algorithm alternates between:
+#   TVAL3 uses the v=Hx split from Section 2.7 with an augmented Lagrangian
+#   continuation strategy (increasing penalty β over outer iterations).
 #
 #   OUTER LOOP (continuation on β):
 #     β starts at beta_init and is multiplied by beta_rate each outer
@@ -966,27 +1063,33 @@
 #
 #   INNER LOOP (for each β, run inner_iter alternating steps):
 #
-#     w-subproblem (TV shrinkage, same as ADMM z-update):
-#       v = ∇x + λ_dual / β
-#       w = shrink(v, λ/β)
+#     v-subproblem (pointwise, same as ADMM v-update):
+#       v ← (M ⊙ y  +  β (Hx − d_v)) / (M + β)
+#
+#     w-subproblem (TV shrinkage):
+#       v_h = ∇_h x + mu_h / β;   v_w = ∇_w x + mu_w / β
+#       w = shrink((v_h, v_w), λ/β)
 #       (Pointwise vectorial soft-thresholding.)
 #
-#     x-subproblem (gradient step on augmented Lagrangian):
-#       The x-minimization of:
-#         (1/2)||M(Hx-y)||² + (β/2)||∇x - w + λ_dual/β||²
-#       is solved by a single linearized gradient step (same approach
-#       as ADMM linearized x-update):
-#         grad_data = H^T[M(Hx - y)]
-#         grad_aug  = -β · div(∇x - w + λ_dual/β)
-#         x = x - τ · (grad_data + grad_aug)
-#       Step size: τ = 1 / (L + β · 8)
+#     x-subproblem (EXACT FFT solve, using v=Hx split):
+#       The x-minimization of the augmented Lagrangian is:
+#         (β|H|² + β|∇|²) x̂ = β H*(v̂ + d̂_v)
+#                              + β ∇̂^T(ŵ − μ̂/β)
+#       This is identical in structure to the ADMM x-update (Section 10)
+#       with ρ_v = ρ_w = β.  One pointwise division in the Fourier domain:
+#         x_new = ifft2( fft2(rhs) / (β * (PF2_full + D_lap)) ).real
+#       where D_lap is precomputed as in ADMMDeconv.__init__.
+#       NOTE: Use forward_grad_periodic / backward_div_periodic for TV
+#       terms (periodic BC required for Fourier-domain solve).
 #
-#     Dual update:
-#       λ_dual = λ_dual + β · (∇x - w)
+#     Dual updates:
+#       d_v  += Hx − v
+#       mu_h += β · (∇_h x − w_h)
+#       mu_w += β · (∇_w x − w_w)
 #
-#   NOTE: λ_dual here is the Lagrange multiplier (a 2-component vector
-#   field like z, u in ADMM), NOT the TV weight lambda_tv.  Use a
-#   distinct variable name (e.g., mu_h, mu_w) to avoid confusion.
+#   NOTE: mu_h, mu_w here are the Lagrange multipliers (a 2-component
+#   vector field), NOT the TV weight lambda_tv.  Use a distinct variable
+#   name to avoid confusion.
 #
 #   CONVERGENCE: Check on x between successive outer iterations.
 #

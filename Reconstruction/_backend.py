@@ -9,7 +9,7 @@ Usage
 -----
 Import symbols directly::
 
-    from ._backend import xp, rfft2, irfft2, ifftshift, _freeze, _to_numpy
+    from ._backend import xp, rfft2, irfft2, fft2, ifft2, fftfreq, ifftshift, _freeze, _to_numpy
 
 To switch backends before constructing any algorithm object::
 
@@ -231,6 +231,86 @@ def irfft2(a: xp.ndarray, s: tuple[int, int], **kwargs) -> xp.ndarray:
         Reconstructed spatial-domain array.
     """
     return _fft.irfft2(a, s=s, **kwargs)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FFT Helpers  (full complex — for algorithms using the complete M×N spectrum)
+# ══════════════════════════════════════════════════════════════════════════════
+# fft2 / ifft2 are needed by ADMM and TVAL3, which diagonalize −∇^T∇ in the
+# full Fourier domain.  The Laplacian eigenvalues
+#   D_lap[k, l] = 4 − 2cos(2πk/H) − 2cos(2πl/W)
+# are defined on the full M×N grid, so rfft2 (half-grid) is not sufficient.
+#
+# fftfreq is provided for computing those eigenvalues in a backend-agnostic
+# way.  It returns the normalised frequencies [0, 1/N, 2/N, …, (N-1)/N]
+# (modulo aliasing), identical to numpy.fft.fftfreq / cupy.fft.fftfreq.
+
+def fft2(a: "xp.ndarray", **kwargs) -> "xp.ndarray":
+    """
+    Backend-agnostic full complex 2-D FFT.
+
+    Returns the full M×N complex spectrum (not the half-spectrum of
+    :func:`rfft2`).  Use this when working with operators whose spectra
+    are defined on the full grid (e.g. the Laplacian eigenvalue tensor
+    for ADMM / TVAL3 x-updates).
+
+    Parameters
+    ----------
+    a : xp.ndarray, shape (H, W)
+        Spatial-domain array (real or complex).
+
+    Returns
+    -------
+    xp.ndarray, shape (H, W), complex
+        Full complex 2-D DFT.
+    """
+    return _fft.fft2(a, **kwargs)
+
+
+def ifft2(a: "xp.ndarray", **kwargs) -> "xp.ndarray":
+    """
+    Backend-agnostic full complex inverse 2-D FFT.
+
+    Parameters
+    ----------
+    a : xp.ndarray, shape (H, W), complex
+        Full complex spectrum (output of :func:`fft2`).
+
+    Returns
+    -------
+    xp.ndarray, shape (H, W), complex
+        Inverse DFT.  Take ``.real`` if the result is known to be real.
+    """
+    return _fft.ifft2(a, **kwargs)
+
+
+def fftfreq(n: int, d: float = 1.0) -> "xp.ndarray":
+    """
+    Backend-agnostic FFT frequency bins.
+
+    Returns the DFT sample frequencies in cycles per sample:
+    ``[0, 1/n, 2/n, …, (n/2−1)/n, −n/2/n, …, −1/n]``.
+
+    Multiply by ``2π`` to get angular frequencies.  Used to precompute
+    the Laplacian eigenvalue tensor for ADMM / TVAL3:
+
+        ky = fftfreq(H) * 2π
+        kx = fftfreq(W) * 2π
+        D_lap = 4 − 2·cos(ky[:, None]) − 2·cos(kx[None, :])
+
+    Parameters
+    ----------
+    n : int
+        Window length.
+    d : float, optional
+        Sample spacing (inverse of sampling rate).  Default 1.0.
+
+    Returns
+    -------
+    xp.ndarray, shape (n,), float
+        Sample frequencies.
+    """
+    return _fft.fftfreq(n, d=d)
 
 
 # For PSF centering we need the full-complex shift helper.

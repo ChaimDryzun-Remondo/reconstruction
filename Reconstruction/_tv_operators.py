@@ -5,11 +5,30 @@ Single source of truth for all TV-related operations shared across
 algorithm modules:
 
   - :func:`forward_grad` / :func:`backward_div` — discrete gradient and
-    divergence forming the adjoint pair under Neumann BC.
+    divergence forming the adjoint pair under **Neumann BC** (zero-flux).
+  - :func:`forward_grad_periodic` / :func:`backward_div_periodic` — the
+    same adjoint pair under **periodic BC** (wrap-around), required by
+    algorithms that diagonalize ∇^T∇ in the Fourier domain (ADMM x-update,
+    TVAL3 x-update).
   - :func:`tv_multiplicative_correction` — Dey et al. correction factor
     used by the RL-TV update.
   - :func:`prox_tv_chambolle` — proximal operator of γ·TV(·) via the
     Chambolle 2004 dual projection algorithm.
+
+**Choosing between Neumann and periodic BC:**
+
+* Use **Neumann** (``forward_grad`` / ``backward_div``) when the TV
+  proximal operator is solved as a standalone ROF subproblem (Chambolle
+  dual projection) or when using the Dey et al. multiplicative correction.
+  The Chambolle solver's self-contained BC need not match the outer
+  algorithm's FFT structure.
+
+* Use **periodic** (``forward_grad_periodic`` / ``backward_div_periodic``)
+  whenever the gradient/divergence pair appears inside a Fourier-domain
+  linear solve (e.g. ADMM or TVAL3 x-updates).  The DFT eigenvalues of
+  −∇^T∇ are ``4 − 2cos(2πf_y) − 2cos(2πf_x)``, which are derived under
+  periodic BC.  Using Neumann BC in that context introduces a model
+  mismatch that silently degrades convergence.
 
 All array operations use ``xp`` imported from ``._backend``.  Never
 import numpy or cupy directly in this module.
@@ -113,6 +132,131 @@ def backward_div(p_h: xp.ndarray, p_w: xp.ndarray) -> xp.ndarray:
     div[:, -1]   += -p_w[:, -2]
 
     return div
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Discrete Gradient & Divergence  (Periodic BC, adjoint pair)
+# ══════════════════════════════════════════════════════════════════════════════
+# These operators form an adjoint pair under periodic (wrap-around) boundary
+# conditions:  ⟨−∇_per x, p⟩ = ⟨x, div_per(p)⟩  for all x, p.
+#
+# **When to use periodic BC vs. Neumann BC:**
+#   Use this pair whenever the gradient appears inside a Fourier-domain linear
+#   solve.  The DFT eigenvalues of −∇^T∇ are
+#       D_lap[k, l] = 4 − 2cos(2πk/H) − 2cos(2πl/W)
+#   which are derived under periodic BC.  Using Neumann BC in that context
+#   introduces a silent model mismatch.
+#
+# Convention:
+#   ∇_per  = forward differences with wrap-around at the last row/col
+#   div_per = backward differences with wrap-around; adjoint of −∇_per
+
+def forward_grad_periodic(x: "xp.ndarray") -> "tuple[xp.ndarray, xp.ndarray]":
+    """
+    Discrete gradient with forward differences and periodic (wrap-around) BC.
+
+    Computes the two-component discrete gradient of a 2-D array using
+    forward finite differences.  Unlike :func:`forward_grad` (Neumann BC),
+    the last row and column wrap around to the first:
+
+        (∂x/∂h)[i, j] = x[i+1, j] − x[i, j]   for i = 0, …, H−2
+        (∂x/∂h)[H−1, j] = x[0, j] − x[H−1, j]  (periodic wrap)
+
+        (∂x/∂w)[i, j] = x[i, j+1] − x[i, j]   for j = 0, …, W−2
+        (∂x/∂w)[i, W−1] = x[i, 0] − x[i, W−1]  (periodic wrap)
+
+    The periodic BC ensures that :func:`backward_div_periodic` is the
+    adjoint of −∇_per under the standard Euclidean inner product:
+
+        ⟨−∇_per x, p⟩ = ⟨x, div_per(p)⟩
+
+    This adjoint property is required for algorithms that diagonalize the
+    operator −∇^T∇ in the Fourier domain (ADMM and TVAL3 x-updates).
+
+    Parameters
+    ----------
+    x : xp.ndarray, shape (H, W)
+        Input 2-D array.
+
+    Returns
+    -------
+    dh, dw : xp.ndarray, each shape (H, W)
+        Vertical (row) and horizontal (column) partial derivatives with
+        periodic wrap-around at the last row/column.
+
+    See Also
+    --------
+    forward_grad : Neumann BC variant (zero at boundaries).
+    backward_div_periodic : Adjoint of −∇_per.
+    """
+    dh = xp.empty_like(x)
+    dw = xp.empty_like(x)
+
+    # Vertical forward differences with periodic wrap
+    dh[:-1, :] = x[1:, :] - x[:-1, :]   # interior rows
+    dh[-1, :]  = x[0, :]  - x[-1, :]    # last row wraps to first
+
+    # Horizontal forward differences with periodic wrap
+    dw[:, :-1] = x[:, 1:] - x[:, :-1]  # interior columns
+    dw[:, -1]  = x[:, 0]  - x[:, -1]   # last col wraps to first
+
+    return dh, dw
+
+
+def backward_div_periodic(
+    p_h: "xp.ndarray",
+    p_w: "xp.ndarray",
+) -> "xp.ndarray":
+    """
+    Discrete divergence with periodic BC (adjoint of −∇_per).
+
+    Computes ``div_per(p) = bwd_h_per(p_h) + bwd_w_per(p_w)`` where the
+    backward differences wrap around at the boundaries:
+
+        bwd_h_per(p)[i, j] = p_h[i, j] − p_h[i−1, j]   (interior: i ≥ 1)
+        bwd_h_per(p)[0, j] = p_h[0, j] − p_h[H−1, j]   (periodic: p[−1] = p[H−1])
+
+    and analogously for ``bwd_w_per`` along columns.
+
+    Equivalently, using ``xp.roll``:
+
+        div_h = p_h − roll(p_h, shift=+1, axis=0)
+        div_w = p_w − roll(p_w, shift=+1, axis=1)
+        return div_h + div_w
+
+    This is the adjoint of the negative periodic forward-difference gradient:
+
+        ⟨−∇_per x, p⟩ = ⟨x, div_per(p)⟩
+
+    for all arrays x, p (no boundary conditions required — periodicity
+    is built into both operators).
+
+    Parameters
+    ----------
+    p_h, p_w : xp.ndarray, each shape (H, W)
+        Vertical and horizontal components of a 2-D vector field.
+
+    Returns
+    -------
+    div : xp.ndarray, shape (H, W)
+        ``div_per(p) = bwd_h_per(p_h) + bwd_w_per(p_w)``.
+
+    Notes
+    -----
+    The roll formulation is used rather than explicit index assignment
+    to avoid off-by-one errors at the boundaries and to be compatible
+    with both NumPy and CuPy backends.
+
+    See Also
+    --------
+    backward_div : Neumann BC variant.
+    forward_grad_periodic : Forward operator (adjoint of −div_per).
+    """
+    # Backward difference = p − shifted(p), where shift=+1 pulls p[i-1]
+    # to position i (equivalently, shift by +1 ≡ p[i] - p[i-1] with wrap).
+    div_h = p_h - xp.roll(p_h, shift=1, axis=0)
+    div_w = p_w - xp.roll(p_w, shift=1, axis=1)
+    return div_h + div_w
 
 
 # ══════════════════════════════════════════════════════════════════════════════

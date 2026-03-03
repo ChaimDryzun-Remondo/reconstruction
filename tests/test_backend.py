@@ -248,3 +248,91 @@ class TestPaddingStr:
             f"  Expected: {sorted(expected)}\n"
             f"  Got:      {sorted(args)}"
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Full complex FFT helpers  (fft2, ifft2, fftfreq)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestFullComplexFFT:
+    """Verify fft2, ifft2, and fftfreq helpers."""
+
+    def test_fft2_ifft2_roundtrip_real(self):
+        """fft2 → ifft2 round-trip recovers a real float32 array."""
+        rng = np.random.default_rng(50)
+        arr_np = rng.random((64, 64)).astype(np.float32)
+        arr = backend.xp.array(arr_np)
+
+        recovered = backend._to_numpy(backend.ifft2(backend.fft2(arr)).real)
+        np.testing.assert_allclose(
+            arr_np, recovered, atol=1e-5,
+            err_msg="fft2 → ifft2 round-trip did not recover original array",
+        )
+
+    def test_fft2_ifft2_roundtrip_complex(self):
+        """fft2 → ifft2 round-trip recovers a complex array."""
+        rng = np.random.default_rng(51)
+        real = rng.random((32, 32)).astype(np.float32)
+        imag = rng.random((32, 32)).astype(np.float32)
+        arr_np = real + 1j * imag
+        arr = backend.xp.array(arr_np)
+
+        recovered = backend._to_numpy(backend.ifft2(backend.fft2(arr)))
+        np.testing.assert_allclose(
+            arr_np.real, recovered.real, atol=1e-5,
+        )
+        np.testing.assert_allclose(
+            arr_np.imag, recovered.imag, atol=1e-5,
+        )
+
+    def test_fft2_output_shape(self):
+        """fft2 of (H, W) returns a full (H, W) complex spectrum."""
+        arr = backend.xp.zeros((64, 64), dtype=backend.xp.float32)
+        spectrum = backend.fft2(arr)
+        assert spectrum.shape == (64, 64), (
+            f"Expected full spectrum shape (64, 64), got {spectrum.shape}"
+        )
+
+    def test_fft2_output_is_complex(self):
+        """fft2 output dtype is complex (not real)."""
+        arr = backend.xp.ones((16, 16), dtype=backend.xp.float32)
+        spectrum = backend.fft2(arr)
+        assert np.issubdtype(
+            backend._to_numpy(spectrum).dtype, np.complexfloating
+        ), "fft2 output should be complex"
+
+    def test_fftfreq_length(self):
+        """fftfreq(n) returns an array of length n."""
+        for n in (8, 16, 32, 64):
+            freq = backend.fftfreq(n)
+            assert len(backend._to_numpy(freq)) == n, (
+                f"fftfreq({n}) returned length {len(backend._to_numpy(freq))}"
+            )
+
+    def test_fftfreq_first_bin_is_zero(self):
+        """fftfreq first element is 0 (DC component)."""
+        freq = backend._to_numpy(backend.fftfreq(16))
+        assert freq[0] == 0.0, f"First fftfreq bin should be 0, got {freq[0]}"
+
+    def test_fftfreq_matches_numpy(self):
+        """fftfreq output matches numpy.fft.fftfreq on CPU."""
+        expected = np.fft.fftfreq(32, d=1.0)
+        result = backend._to_numpy(backend.fftfreq(32, d=1.0))
+        np.testing.assert_allclose(result, expected, atol=1e-10)
+
+    def test_fftfreq_with_sample_spacing(self):
+        """fftfreq(n, d=d) matches numpy.fft.fftfreq(n, d=d)."""
+        expected = np.fft.fftfreq(16, d=0.5)
+        result = backend._to_numpy(backend.fftfreq(16, d=0.5))
+        np.testing.assert_allclose(result, expected, atol=1e-10)
+
+    def test_fft2_dc_value(self):
+        """fft2 DC bin [0,0] equals the sum of all elements."""
+        arr_np = np.ones((8, 8), dtype=np.float32)
+        arr = backend.xp.array(arr_np)
+        spectrum = backend._to_numpy(backend.fft2(arr))
+        dc = spectrum[0, 0]
+        expected_dc = float(np.sum(arr_np))
+        assert abs(dc.real - expected_dc) < 1e-4, (
+            f"DC bin should be {expected_dc}, got {dc.real:.4f}"
+        )
