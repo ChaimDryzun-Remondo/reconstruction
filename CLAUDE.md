@@ -10,16 +10,16 @@ The package is being built from two existing standalone files (`RL_Unknown_Bound
 
 ```
 Reconstruction/
-├── __init__.py                         # Public API re-exports
+├── __init__.py                         # Public API re-exports (Phase 6 — complete)
 ├── _backend.py                         # GPU detection, xp/fft backend, FFT helpers, utilities
 ├── _tv_operators.py                    # Gradient, divergence, Chambolle prox_TV, Dey multiplicative TV
 ├── _base.py                            # DeconvBase abstract class (shared constructor + interface)
 ├── rl_unknown_boundary.py              # RLUnknownBoundary(DeconvBase)
 ├── landweber_unknown_boundary.py       # LandweberUnknownBoundary(DeconvBase)
 ├── wiener.py                           # WienerDeconv(DeconvBase)
-├── rl_standard.py                      # RLStandard(DeconvBase)
-├── admm.py                             # ADMMDeconv(DeconvBase)
-└── tval3.py                            # TVAL3Deconv(DeconvBase)
+├── admm.py                             # ADMMDeconv(DeconvBase) — overridable prior interface
+├── tval3.py                            # TVAL3Deconv(DeconvBase) — adaptive TV, exact FFT solve
+└── pnp_admm.py                         # PnPADMM(ADMMDeconv) — BM3D denoiser prior (optional)
 ```
 
 **Dependency flow** (strict — no circular imports):
@@ -98,15 +98,15 @@ algorithm-specific.
 
 The full specification is in `docs/RECONSTRUCTION_SPEC.py`. Implementation follows 7 phases in strict order:
 
-1. `_backend.py` — extract shared GPU/FFT infrastructure
-2. `_tv_operators.py` — extract TV operators (gradient, divergence, Chambolle prox, Dey correction)
-3. `_base.py` — build abstract base class with shared constructor
-4. `rl_unknown_boundary.py` + `landweber_unknown_boundary.py` — refactor existing algorithms as thin subclasses
-5. `wiener.py`, `rl_standard.py`, `admm.py`, `tval3.py` — new algorithms (independent, any order)
-6. `__init__.py` — public API
-7. Integration testing + cleanup
+1. ✅ `_backend.py` — extract shared GPU/FFT infrastructure (commit eec66b7)
+2. ✅ `_tv_operators.py` — extract TV operators, add periodic BC ops (commit 06c7a1d)
+3. ✅ `_base.py` — build abstract base class with shared constructor (commit a13b686)
+4. ✅ `rl_unknown_boundary.py` + `landweber_unknown_boundary.py` — refactor as thin subclasses (commits 4dcf29b, 2dff589)
+5. ✅ `wiener.py`, `admm.py`, `tval3.py`, `pnp_admm.py` — new algorithms (commits 462fc48, 57de9fa, 1e9121a, 71ea058)
+6. ✅ `__init__.py` — public API with conditional PnP import
+7. ✅ Integration testing + cleanup — package-level API tests + cross-algorithm smoke tests
 
-**Each phase ends with a verification step defined in the spec. Run verifications before proceeding to the next phase.**
+**All 7 phases complete. 396+ tests passing.**
 
 ## Reference Files
 
@@ -212,6 +212,8 @@ This is a satellite imaging project. Key concepts:
 - **TV (Total Variation)**: edge-preserving regularization. Penalizes the L1 norm of the image gradient, which promotes piecewise-smooth solutions.
 - **FISTA**: Fast Iterative Shrinkage-Thresholding Algorithm (Beck & Teboulle, 2009). Nesterov-accelerated proximal gradient with O(1/k²) convergence.
 - **Proximal operator**: `prox_{γf}(v) = argmin_u (1/2)||u-v||² + γf(u)`. For TV, this is the ROF denoising problem, solved via Chambolle's dual projection.
+- **Plug-and-Play (PnP) priors**: Replace the explicit TV proximal step with a general denoiser (e.g., BM3D). If the denoiser approximates the proximal operator of some implicit regularizer R, the ADMM iterates solve `min_x D(x) + λR(x)` without an explicit formula for R. PnPADMM inherits the full ADMM scaffolding from ADMMDeconv and overrides only the four prior-interface methods. The effective denoiser strength per iteration is σ = sigma_scale · √(λ/ρ_z); the x-update denominator simplifies to ρ_v|H|² + ρ_z (no Laplacian, because the z=x split doesn't involve spatial differences).
+- **BM3D**: Block-Matching 3D denoiser (Dabov et al. 2007). State-of-the-art non-local patch-based denoiser. CPU-only (`pip install bm3d`). Inputs must be in [0,1]; sigma_psd is the noise standard deviation in that scale.
 
 ## Common Pitfalls
 
