@@ -25,7 +25,8 @@ dev = [
     "pytest-cov",
 ]
 pnp = ["bm3d>=4.0"]
-all = ["reconstruction[gpu,imaging,dev,pnp]"]
+wavelet = ["PyWavelets>=1.4"]
+all = ["reconstruction[gpu,imaging,dev,pnp,wavelet]"]
 
 [tool.setuptools.packages.find]
 include = ["Reconstruction*"]

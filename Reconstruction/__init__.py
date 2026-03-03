@@ -47,6 +47,9 @@ Algorithm summary
 +---------------------------+---------------------------+------------------------------------+-----------------------------------------------+
 | PnP-ADMM                  | PnPADMM                   | pnp_admm_deblur                    | BM3D denoiser prior; requires bm3d package    |
 +---------------------------+---------------------------+------------------------------------+-----------------------------------------------+
+| FISTA                     | FISTADeconv               | fista_deblur                       | TV / L1 / wavelet sparsity; textbook          |
+|                           |                           |                                    | Beck-Teboulle 2009; overridable prox step     |
++---------------------------+---------------------------+------------------------------------+-----------------------------------------------+
 
 PnP-ADMM is conditionally available — it requires ``pip install bm3d``.  The
 rest of the package imports and runs without it.
@@ -65,6 +68,7 @@ from .landweber_unknown_boundary import (
 )
 from .admm import ADMMDeconv, admm_deblur
 from .tval3 import TVAL3Deconv, tval3_deblur
+from .fista import FISTADeconv, fista_deblur
 
 # ── Optional PnP-ADMM (requires bm3d) ─────────────────────────────────────
 # The bm3d package is an optional dependency (pip install bm3d).
@@ -89,12 +93,14 @@ __all__ = [
     "LandweberUnknownBoundary",
     "ADMMDeconv",
     "TVAL3Deconv",
+    "FISTADeconv",
     # core wrappers
     "wiener_deblur",
     "rl_deblur_unknown_boundary",
     "landweber_deblur_unknown_boundary",
     "admm_deblur",
     "tval3_deblur",
+    "fista_deblur",
     # package metadata
     "__version__",
 ]
