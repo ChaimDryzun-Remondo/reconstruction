@@ -3,8 +3,10 @@ Shared fixtures for Reconstruction package tests.
 
 Provides:
   - Synthetic test images and PSFs.
-  - Mock/stub implementations of Shared.Common utilities so tests can
-    run without the broader project installed.
+  - Mock/stub implementations of RemondoPythonCore.Common utilities so tests
+    can run without the broader project installed.  Shared.Common stubs are
+    also installed for compatibility with the docs/reference/*.py regression
+    tests (which still import from that namespace).
 """
 
 from __future__ import annotations
@@ -16,12 +18,12 @@ import pytest
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Mock Shared.Common Utilities
+# Mock RemondoPythonCore.Common / Shared.Common Utilities
 # ═══════════════════════════════════════════════════════════════════════════
-# The Reconstruction package imports from Shared.Common, which lives
-# outside this repo.  These stubs replicate the minimal behaviour needed
-# for tests.  They are injected into sys.modules BEFORE any Reconstruction
-# import, so the real Shared.Common is never required.
+# The Reconstruction package imports from RemondoPythonCore.Common, which
+# lives outside this repo.  These stubs replicate the minimal behaviour
+# needed for tests.  They are injected into sys.modules BEFORE any
+# Reconstruction import, so the real packages are never required.
 
 def _mock_padding(image: np.ndarray, full_size: tuple[int, int],
                   Type: str = "Reflect", apply_taper: bool = False) -> np.ndarray:
@@ -124,40 +126,12 @@ def _mock_odd_crop_around_center(image: np.ndarray,
 
 
 def _install_mocks() -> None:
-    """Inject mock Shared.Common and RemondoPythonCore.Common modules into sys.modules."""
-    # Only install mocks if the real modules are not available.
-    if "Shared.Common.General_Utilities" in sys.modules:
-        return
+    """Inject mock modules into sys.modules before any Reconstruction imports.
 
-    # ── Shared.Common.* ───────────────────────────────────────────────────
-    shared = types.ModuleType("Shared")
-    shared.__path__ = []
-    common = types.ModuleType("Shared.Common")
-    common.__path__ = []
-
-    gen_utils = types.ModuleType("Shared.Common.General_Utilities")
-    gen_utils.padding = _mock_padding
-    gen_utils.cropping = _mock_cropping
-
-    psf_pre = types.ModuleType("Shared.Common.PSF_Preprocessing")
-    psf_pre.psf_preprocess = _mock_psf_preprocess
-    psf_pre.condition_psf = _mock_condition_psf
-
-    img_pre = types.ModuleType("Shared.Common.Image_Preprocessing")
-    img_pre.image_normalization = _mock_image_normalization
-    img_pre.validate_image = _mock_validate_image
-    img_pre.to_grayscale = _mock_to_grayscale
-    img_pre.odd_crop_around_center = _mock_odd_crop_around_center
-
-    sys.modules["Shared"] = shared
-    sys.modules["Shared.Common"] = common
-    sys.modules["Shared.Common.General_Utilities"] = gen_utils
-    sys.modules["Shared.Common.PSF_Preprocessing"] = psf_pre
-    sys.modules["Shared.Common.Image_Preprocessing"] = img_pre
-
-    # ── RemondoPythonCore.Common.* ────────────────────────────────────────
-    # The reference Wiener.py (docs/reference/) imports from this path.
-    # Provide identical stubs so regression tests can load the reference.
+    Each namespace is guarded independently so that whichever is already
+    provided by the real project is left untouched while the other is mocked.
+    """
+    # ── RemondoPythonCore.Common.* (primary import path in _base.py) ──────
     if "RemondoPythonCore.Common.General_Utilities" not in sys.modules:
         rpc = types.ModuleType("RemondoPythonCore")
         rpc.__path__ = []
@@ -177,12 +151,40 @@ def _install_mocks() -> None:
         rpc_img_pre.image_normalization = _mock_image_normalization
         rpc_img_pre.validate_image = _mock_validate_image
         rpc_img_pre.to_grayscale = _mock_to_grayscale
+        rpc_img_pre.odd_crop_around_center = _mock_odd_crop_around_center
 
         sys.modules["RemondoPythonCore"] = rpc
         sys.modules["RemondoPythonCore.Common"] = rpc_common
         sys.modules["RemondoPythonCore.Common.General_Utilities"] = rpc_gen_utils
         sys.modules["RemondoPythonCore.Common.PSF_Preprocessing"] = rpc_psf_pre
         sys.modules["RemondoPythonCore.Common.Image_Preprocessing"] = rpc_img_pre
+
+    # ── Shared.Common.* (needed by docs/reference/*.py regression tests) ──
+    if "Shared.Common.General_Utilities" not in sys.modules:
+        shared = types.ModuleType("Shared")
+        shared.__path__ = []
+        s_common = types.ModuleType("Shared.Common")
+        s_common.__path__ = []
+
+        s_gen = types.ModuleType("Shared.Common.General_Utilities")
+        s_gen.padding = _mock_padding
+        s_gen.cropping = _mock_cropping
+
+        s_psf = types.ModuleType("Shared.Common.PSF_Preprocessing")
+        s_psf.psf_preprocess = _mock_psf_preprocess
+        s_psf.condition_psf = _mock_condition_psf
+
+        s_img = types.ModuleType("Shared.Common.Image_Preprocessing")
+        s_img.image_normalization = _mock_image_normalization
+        s_img.validate_image = _mock_validate_image
+        s_img.to_grayscale = _mock_to_grayscale
+        s_img.odd_crop_around_center = _mock_odd_crop_around_center
+
+        sys.modules["Shared"] = shared
+        sys.modules["Shared.Common"] = s_common
+        sys.modules["Shared.Common.General_Utilities"] = s_gen
+        sys.modules["Shared.Common.PSF_Preprocessing"] = s_psf
+        sys.modules["Shared.Common.Image_Preprocessing"] = s_img
 
 
 # Install mocks at import time (before any Reconstruction imports).

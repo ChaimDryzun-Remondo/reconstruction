@@ -24,10 +24,12 @@ import numpy as np
 from ._backend import (
     xp, rfft2, irfft2, ifftshift, _freeze, _to_numpy, _use_gpu, PaddingStr,
 )
-from Shared.Common.General_Utilities import padding, cropping
-from Shared.Common.PSF_Preprocessing import psf_preprocess, condition_psf
-from Shared.Common.Image_Preprocessing import (
-    image_normalization, validate_image, to_grayscale, odd_crop_around_center,
+from RemondoPythonCore.Common.General_Utilities import (
+    padding, cropping, odd_crop_around_center,
+)
+from RemondoPythonCore.Common.PSF_Preprocessing import psf_preprocess, condition_psf
+from RemondoPythonCore.Common.Image_Preprocessing import (
+    image_normalization, validate_image, to_grayscale,
 )
 
 logger = logging.getLogger(__name__)
