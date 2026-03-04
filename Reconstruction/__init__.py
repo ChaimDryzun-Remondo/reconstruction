@@ -53,9 +53,12 @@ Algorithm summary
 | Chambolle-Pock            | ChambollePockDeconv       | chambolle_pock_deblur              | TV; Condat-Vũ primal-dual forward-backward;   |
 | (Condat-Vũ)               |                           |                                    | isotropic / anisotropic TV; no proxG needed   |
 +---------------------------+---------------------------+------------------------------------+-----------------------------------------------+
+| RED-ADMM                  | REDDeconv                 | red_deblur                         | Regularization by Denoising [REM17]; BM3D     |
+|                           |                           |                                    | prior; fixed σ; requires bm3d package         |
++---------------------------+---------------------------+------------------------------------+-----------------------------------------------+
 
-PnP-ADMM is conditionally available — it requires ``pip install bm3d``.  The
-rest of the package imports and runs without it.
+PnP-ADMM and RED-ADMM are conditionally available — they require
+``pip install bm3d``.  The rest of the package imports and runs without it.
 """
 from __future__ import annotations
 
@@ -74,16 +77,21 @@ from .tval3 import TVAL3Deconv, tval3_deblur
 from .fista import FISTADeconv, fista_deblur
 from .chambolle_pock import ChambollePockDeconv, chambolle_pock_deblur
 
-# ── Optional PnP-ADMM (requires bm3d) ─────────────────────────────────────
+# ── Optional BM3D-based algorithms (require bm3d) ─────────────────────────
 # The bm3d package is an optional dependency (pip install bm3d).
-# If it is not installed we silently skip the import so that the package
-# is usable without BM3D.  PnPADMM / pnp_admm_deblur will NOT be present
-# in the package namespace in that case.
+# If it is not installed we silently skip both imports so that the package
+# is usable without BM3D.
 try:
     from .pnp_admm import PnPADMM, pnp_admm_deblur
     _HAS_PNP: bool = True
 except ImportError:
     _HAS_PNP = False
+
+try:
+    from .red_admm import REDDeconv, red_deblur
+    _HAS_RED: bool = True
+except ImportError:
+    _HAS_RED = False
 
 # ── Public API ─────────────────────────────────────────────────────────────
 __version__: str = "0.1.0"
@@ -113,3 +121,6 @@ __all__ = [
 
 if _HAS_PNP:
     __all__ += ["PnPADMM", "pnp_admm_deblur"]
+
+if _HAS_RED:
+    __all__ += ["REDDeconv", "red_deblur"]

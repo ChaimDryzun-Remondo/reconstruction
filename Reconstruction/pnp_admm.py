@@ -90,17 +90,11 @@ from typing import Optional
 
 import numpy as np
 
-from ._backend import xp, _to_numpy
+from ._backend import xp
+from ._denoise_utils import _HAS_BM3D, bm3d_denoise
 from .admm import ADMMDeconv
 
 logger = logging.getLogger(__name__)
-
-# ── Optional BM3D import ──────────────────────────────────────────────────────
-try:
-    from bm3d import bm3d as _bm3d_func
-    _HAS_BM3D: bool = True
-except ImportError:
-    _HAS_BM3D = False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -376,21 +370,7 @@ class PnPADMM(ADMMDeconv):
         xp.ndarray
             Denoised image, same dtype and shape as input.
         """
-        if sigma < 1e-6:
-            # No meaningful denoising; return as-is to avoid BM3D no-op artefacts
-            return image
-
-        image_np = _to_numpy(image).astype(np.float64)
-        image_np = np.clip(image_np, 0.0, 1.0)
-
-        denoised_np = _bm3d_func(
-            image_np,
-            sigma_psd=sigma,
-            profile=self.denoiser_profile,
-        )
-        denoised_np = np.clip(denoised_np, 0.0, 1.0)
-
-        return xp.array(denoised_np, dtype=image.dtype)
+        return bm3d_denoise(image, sigma, self.denoiser_profile)
 
     # ══════════════════════════════════════════════════════════════════════
     # Properties

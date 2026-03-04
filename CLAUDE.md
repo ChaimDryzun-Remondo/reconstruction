@@ -19,7 +19,9 @@ Reconstruction/
 ├── wiener.py                           # WienerDeconv(DeconvBase)
 ├── admm.py                             # ADMMDeconv(DeconvBase) — overridable prior interface
 ├── tval3.py                            # TVAL3Deconv(DeconvBase) — adaptive TV, exact FFT solve
+├── _denoise_utils.py                   # Shared BM3D wrapper (bm3d_denoise) used by PnP and RED
 ├── pnp_admm.py                         # PnPADMM(ADMMDeconv) — BM3D denoiser prior (optional)
+├── red_admm.py                         # REDDeconv(ADMMDeconv) — RED-ADMM, fixed-σ BM3D prior (optional)
 ├── fista.py                            # FISTADeconv(DeconvBase) — FISTA TV/L1/L1_wavelet (pywt optional)
 └── chambolle_pock.py                   # ChambollePockDeconv(DeconvBase) — Condat-Vũ primal-dual, isotropic/anisotropic TV
 ```
@@ -109,8 +111,9 @@ The full specification is in `docs/RECONSTRUCTION_SPEC.py`. Implementation follo
 7. ✅ Integration testing + cleanup — package-level API tests + cross-algorithm smoke tests
 8. ✅ `fista.py` — FISTA with TV/L1/L1_wavelet modes, overridable _prox_step, O'Donoghue-Candès restart
 9. ✅ `chambolle_pock.py` — Condat-Vũ primal-dual forward-backward, isotropic/anisotropic TV, periodic BC
+10. ✅ `red_admm.py` — RED-ADMM: Regularization by Denoising [Romano et al. 2017], fixed-σ BM3D prior; shared `_denoise_utils.py`
 
-**All 9 phases complete.**
+**All 10 phases complete.**
 
 ## Reference Files
 
