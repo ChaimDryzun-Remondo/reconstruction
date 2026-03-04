@@ -20,7 +20,8 @@ Reconstruction/
 ├── admm.py                             # ADMMDeconv(DeconvBase) — overridable prior interface
 ├── tval3.py                            # TVAL3Deconv(DeconvBase) — adaptive TV, exact FFT solve
 ├── pnp_admm.py                         # PnPADMM(ADMMDeconv) — BM3D denoiser prior (optional)
-└── fista.py                            # FISTADeconv(DeconvBase) — FISTA TV/L1/L1_wavelet (pywt optional)
+├── fista.py                            # FISTADeconv(DeconvBase) — FISTA TV/L1/L1_wavelet (pywt optional)
+└── chambolle_pock.py                   # ChambollePockDeconv(DeconvBase) — Condat-Vũ primal-dual, isotropic/anisotropic TV
 ```
 
 **Dependency flow** (strict — no circular imports):
@@ -107,8 +108,9 @@ The full specification is in `docs/RECONSTRUCTION_SPEC.py`. Implementation follo
 6. ✅ `__init__.py` — public API with conditional PnP import
 7. ✅ Integration testing + cleanup — package-level API tests + cross-algorithm smoke tests
 8. ✅ `fista.py` — FISTA with TV/L1/L1_wavelet modes, overridable _prox_step, O'Donoghue-Candès restart
+9. ✅ `chambolle_pock.py` — Condat-Vũ primal-dual forward-backward, isotropic/anisotropic TV, periodic BC
 
-**All 8 phases complete.**
+**All 9 phases complete.**
 
 ## Reference Files
 

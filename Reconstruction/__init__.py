@@ -50,6 +50,9 @@ Algorithm summary
 | FISTA                     | FISTADeconv               | fista_deblur                       | TV / L1 / wavelet sparsity; textbook          |
 |                           |                           |                                    | Beck-Teboulle 2009; overridable prox step     |
 +---------------------------+---------------------------+------------------------------------+-----------------------------------------------+
+| Chambolle-Pock            | ChambollePockDeconv       | chambolle_pock_deblur              | TV; Condat-Vũ primal-dual forward-backward;   |
+| (Condat-Vũ)               |                           |                                    | isotropic / anisotropic TV; no proxG needed   |
++---------------------------+---------------------------+------------------------------------+-----------------------------------------------+
 
 PnP-ADMM is conditionally available — it requires ``pip install bm3d``.  The
 rest of the package imports and runs without it.
@@ -69,6 +72,7 @@ from .landweber_unknown_boundary import (
 from .admm import ADMMDeconv, admm_deblur
 from .tval3 import TVAL3Deconv, tval3_deblur
 from .fista import FISTADeconv, fista_deblur
+from .chambolle_pock import ChambollePockDeconv, chambolle_pock_deblur
 
 # ── Optional PnP-ADMM (requires bm3d) ─────────────────────────────────────
 # The bm3d package is an optional dependency (pip install bm3d).
@@ -94,6 +98,7 @@ __all__ = [
     "ADMMDeconv",
     "TVAL3Deconv",
     "FISTADeconv",
+    "ChambollePockDeconv",
     # core wrappers
     "wiener_deblur",
     "rl_deblur_unknown_boundary",
@@ -101,6 +106,7 @@ __all__ = [
     "admm_deblur",
     "tval3_deblur",
     "fista_deblur",
+    "chambolle_pock_deblur",
     # package metadata
     "__version__",
 ]
