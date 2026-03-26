@@ -4,7 +4,7 @@ with proximal TV as a thin subclass of DeconvBase.
 
 Solves the variational problem:
 
-    min_x  (1/2) ||M(Hx − y)||²  +  λ · TV(x)
+    min_x  (1/2) ||M(Hx - y)||²  +  λ · TV(x)
 
 where H is convolution with the PSF, M is the binary mask, and TV is
 isotropic total variation.
@@ -107,7 +107,7 @@ class LandweberUnknownBoundary(DeconvBase):
             Number of inner Chambolle iterations for the TV proximal
             operator.
         adaptive_restart : bool
-            Apply O'Donoghue–Candès velocity restart: when consecutive
+            Apply O'Donoghue-Candès velocity restart: when consecutive
             iterate steps reverse direction, reset momentum.
 
         Returns

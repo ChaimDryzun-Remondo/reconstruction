@@ -141,7 +141,7 @@ class DeconvBase(ABC):
         if OH <= 0 or OW <= 0:
             raise ValueError(
                 "Image is too small after enforcing odd spatial shape "
-                f"(result would be {OH}×{OW})."
+                f"(result would be {OH}x{OW})."
             )
         if (OH, OW) != (H, W):
             gray = odd_crop_around_center(gray, (OH, OW))
