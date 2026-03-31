@@ -293,7 +293,7 @@ class PnPADMM(ADMMDeconv):
 
         denoiser_input = u + state["d_z"]
         state["z"] = self._denoise(denoiser_input, sigma)
-
+        
         logger.debug("PnP z-update: sigma=%.4f", sigma)
 
         # Spatial-domain prior RHS: ρ_z (z − d_z)
@@ -371,6 +371,34 @@ class PnPADMM(ADMMDeconv):
             Denoised image, same dtype and shape as input.
         """
         return bm3d_denoise(image, sigma, self.denoiser_profile)
+
+    def _check_prior_convergence(
+        self,
+        u: xp.ndarray,
+        state: dict,
+        rho_w: float,
+        tol: float,
+    ) -> tuple[bool, float, dict]:
+        """
+        PnP-specific convergence for the z = x split.
+
+        rho_w in the parent interface is rho_z here.
+        """
+        rho_z = float(rho_w)
+        z = state["z"]
+        z_old = state.get("z_old", z)
+
+        r_pz = float(xp.linalg.norm(u - z))
+        r_dz = rho_z * float(xp.linalg.norm(z - z_old))
+
+        scale = float(xp.linalg.norm(u)) + 1e-8
+        rel = max(r_pz, r_dz) / scale
+        ok = rel < tol
+
+        return ok, rel, {
+            "z_primal": r_pz,
+            "z_dual": r_dz,
+        }
 
     # ══════════════════════════════════════════════════════════════════════
     # Properties

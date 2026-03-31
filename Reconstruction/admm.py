@@ -415,6 +415,27 @@ class ADMMDeconv(DeconvBase):
             return data_term + lambda_tv * tv_term
         return data_term
 
+    def _check_prior_convergence(
+        self,
+        u: xp.ndarray,
+        state: dict,
+        rho_w: float,
+        tol: float,
+    ) -> tuple[bool, float, dict]:
+        """
+        Optional prior-specific convergence hook.
+
+        Default implementation: no extra prior residuals.
+        Subclasses (e.g. PnP) can override.
+
+        Returns
+        -------
+        prior_ok : bool
+        prior_rel : float
+        prior_stats : dict
+        """
+        return True, 0.0, {}
+
     def _check_admm_convergence(
         self,
         Hx: xp.ndarray,
@@ -613,34 +634,55 @@ class ADMMDeconv(DeconvBase):
                 )
                 break
 
-            # ── Step 9: Primal/dual convergence check (v-constraint only) ──
+            # ── Step 9: Primal/dual convergence check ────────────────────────────
             if k >= min_iter and k % check_every == 0:
-                converged, rel_change, r_primal, r_dual = (
-                    self._check_admm_convergence(
-                        Hx_k, v, v_old, rho_v, u, tol,
-                    )
+                converged_v, rel_v, r_primal_v, r_dual_v = self._check_admm_convergence(
+                    Hx_k, v, v_old, rho_v, u, tol,
                 )
+
+                prior_ok, prior_rel, prior_stats = self._check_prior_convergence(
+                    u, state, rho_w, tol,
+                )
+
+                rel_change = max(rel_v, prior_rel)
+                converged = converged_v and prior_ok
+
                 if verbose:
-                    logger.debug(
-                        "  v_primal=%.3e  v_dual=%.3e  rel=%.3e",
-                        r_primal, r_dual, rel_change,
+                    msg = (
+                        f"  v_primal={r_primal_v:.3e}  "
+                        f"v_dual={r_dual_v:.3e}  "
+                        f"rel_v={rel_v:.3e}"
                     )
+                    if prior_stats:
+                        for key, val in prior_stats.items():
+                            msg += f"  {key}={val:.3e}"
+                        msg += f"  rel_prior={prior_rel:.3e}"
+                    logger.debug(msg)
+
                 if converged:
                     logger.info(
-                        "Converged at iter %d/%d "
-                        "(v_primal=%.2e, v_dual=%.2e, rel=%.2e < tol=%.2e)",
-                        k, num_iter, r_primal, r_dual, rel_change, tol,
+                        "Converged at iter %d/%d (rel=%.2e < tol=%.2e)",
+                        k, num_iter, rel_change, tol,
                     )
                     break
 
-            # ── Step 10: Adaptive ρ_v (Boyd §3.4.1) ───────────────────────
+            # ── Step 10: Adaptive ρ_v (Boyd §3.4.1) ─────────────────────────────
             r_pv = float(xp.linalg.norm(Hx_k - v))
             r_dv = rho_v * float(xp.linalg.norm(v - v_old))
             ratio = r_pv / (r_dv + eps)
+
+            rho_v_old = rho_v
+            rho_v_new = rho_v
+
             if ratio > 10.0:
-                rho_v = min(rho_v * self.rho_factor, self.rho_max)
+                rho_v_new = min(rho_v * self.rho_factor, self.rho_max)
             elif ratio < 0.1:
-                rho_v = max(rho_v / self.rho_factor, self.rho_min)
+                rho_v_new = max(rho_v / self.rho_factor, self.rho_min)
+
+            if rho_v_new != rho_v_old:
+                # scaled-dual consistency: u_scaled = y / rho
+                d_v *= (rho_v_old / rho_v_new)
+                rho_v = rho_v_new
 
         else:
             self._log_no_convergence(num_iter, tol)
