@@ -88,7 +88,7 @@ from typing import Optional
 
 import numpy as np
 
-from ._backend import xp, rfft2, irfft2
+from . import _backend as backend
 from ._base import DeconvBase
 from ._tv_operators import forward_grad_periodic, backward_div_periodic
 
@@ -188,6 +188,12 @@ class ChambollePockDeconv(DeconvBase):
                 f"TVnorm must be 1 or 2, got {TVnorm!r}.  "
                 "Use 2 for isotropic TV or 1 for anisotropic TV."
             )
+        if sigma_dual is not None and sigma_dual <= 0.0:
+            raise ValueError(
+                f"sigma_dual must be positive when provided, got {sigma_dual!r}"
+            )
+        if not (0.0 <= theta <= 1.0):
+            raise ValueError(f"theta must be in [0, 1], got {theta!r}")
 
         self._TVnorm: int = int(TVnorm)
         self._theta: float = float(theta)
@@ -270,13 +276,24 @@ class ChambollePockDeconv(DeconvBase):
         np.ndarray, shape (self.h, self.w)
             Deconvolved image on CPU, cropped to the original field of view.
         """
-        num_iter    = int(np.clip(num_iter, 1, 10000))
+        if num_iter < 1:
+            raise ValueError(f"num_iter must be >= 1, got {num_iter!r}")
+        if lambda_tv < 0.0:
+            raise ValueError(f"lambda_tv must be >= 0, got {lambda_tv!r}")
+        if tol < 0.0:
+            raise ValueError(f"tol must be >= 0, got {tol!r}")
+        if min_iter < 0:
+            raise ValueError(f"min_iter must be >= 0, got {min_iter!r}")
+        if check_every < 1:
+            raise ValueError(f"check_every must be >= 1, got {check_every!r}")
+
+        num_iter    = int(num_iter)
         nonneg_flag = self.nonneg if nonneg is None else bool(nonneg)
 
-        sigma = xp.float32(self._sigma)
-        tau   = xp.float32(self._tau)
-        theta = xp.float32(self._theta)
-        lam   = xp.float32(lambda_tv)
+        sigma = backend.xp.float32(self._sigma)
+        tau   = backend.xp.float32(self._tau)
+        theta = backend.xp.float32(self._theta)
+        lam   = backend.xp.float32(lambda_tv)
         s     = self.full_shape
         PF    = self.PF
         cPF   = self.conjPF
@@ -293,8 +310,8 @@ class ChambollePockDeconv(DeconvBase):
         # ── State initialization ─────────────────────────────────────────
         x     = self.estimated_image.copy()   # primal variable
         x_bar = x.copy()                      # extrapolated point
-        p_h   = xp.zeros_like(x)             # dual variable (vertical)
-        p_w   = xp.zeros_like(x)             # dual variable (horizontal)
+        p_h   = backend.xp.zeros_like(x)             # dual variable (vertical)
+        p_w   = backend.xp.zeros_like(x)             # dual variable (horizontal)
 
         for k in range(num_iter):
             x_old = x
@@ -311,9 +328,9 @@ class ChambollePockDeconv(DeconvBase):
             del p_h_tilde, p_w_tilde
 
             # ── 2. Primal gradient ∇G(x) = H^T [M ⊙ (Hx − y)] ──────────
-            Hx    = irfft2(PF * rfft2(x), s=s)
+            Hx    = backend.irfft2(PF * backend.rfft2(x), s=s)
             resid = M * (Hx - y)
-            grad_G = irfft2(cPF * rfft2(resid), s=s)
+            grad_G = backend.irfft2(cPF * backend.rfft2(resid), s=s)
             del Hx, resid
 
             # ── 3. Primal update ─────────────────────────────────────────
@@ -325,7 +342,7 @@ class ChambollePockDeconv(DeconvBase):
 
             # ── 4. Positivity projection ─────────────────────────────────
             if nonneg_flag:
-                xp.maximum(x_new, xp.float32(0.0), out=x_new)
+                backend.xp.maximum(x_new, backend.xp.float32(0.0), out=x_new)
 
             # ── 5. Convergence check ─────────────────────────────────────
             if k >= min_iter and (k + 1) % check_every == 0:
@@ -355,10 +372,10 @@ class ChambollePockDeconv(DeconvBase):
 
     def _dual_project(
         self,
-        p_h: "xp.ndarray",
-        p_w: "xp.ndarray",
-        lam: "xp.ndarray",
-    ) -> "tuple[xp.ndarray, xp.ndarray]":
+        p_h: "backend.xp.ndarray",
+        p_w: "backend.xp.ndarray",
+        lam: "backend.xp.ndarray",
+    ) -> "tuple[backend.xp.ndarray, backend.xp.ndarray]":
         """
         Project the dual variable onto the feasible set for the selected TV norm.
 
@@ -370,25 +387,28 @@ class ChambollePockDeconv(DeconvBase):
 
         Parameters
         ----------
-        p_h, p_w : xp.ndarray, shape (H, W)
+        p_h, p_w : backend.xp.ndarray, shape (H, W)
             Tentative dual variable after the gradient step.
-        lam : xp.ndarray (scalar float32)
+        lam : backend.xp.ndarray (scalar float32)
             TV regularization weight λ.
 
         Returns
         -------
-        p_h_new, p_w_new : xp.ndarray, each shape (H, W)
+        p_h_new, p_w_new : backend.xp.ndarray, each shape (H, W)
             Projected dual variable.
         """
         if self._TVnorm == 2:
+            if float(lam) <= 0.0:
+                zero = backend.xp.zeros_like(p_h)
+                return zero, zero.copy()
             # Isotropic: project per-pixel (p_h, p_w) vector onto the λ-disk.
             # scale = λ / max(‖p‖₂, λ) — equals 1 when ‖p‖₂ ≤ λ (no-op).
-            mag   = xp.sqrt(p_h * p_h + p_w * p_w)
-            scale = lam / xp.maximum(mag, lam)
+            mag   = backend.xp.sqrt(p_h * p_h + p_w * p_w)
+            scale = lam / backend.xp.maximum(mag, lam)
             return p_h * scale, p_w * scale
         else:
             # Anisotropic: clamp each component to [−λ, λ].
-            return xp.clip(p_h, -lam, lam), xp.clip(p_w, -lam, lam)
+            return backend.xp.clip(p_h, -lam, lam), backend.xp.clip(p_w, -lam, lam)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

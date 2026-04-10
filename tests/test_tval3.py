@@ -470,6 +470,25 @@ class TestConvergence:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 11b. Validation / edge cases
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestValidation:
+
+    def test_num_iter_zero_raises_value_error(self, blurred, small_psf):
+        solver = TVAL3Deconv(blurred, small_psf, mu=16.0, adaptive_tv=False)
+        with pytest.raises(ValueError, match="num_iter"):
+            solver.deblur(num_iter=0, lambda_tv=0.01)
+
+    def test_lambda_tv_zero_runs_without_nan(self, blurred, small_psf):
+        result = TVAL3Deconv(
+            blurred, small_psf, mu=16.0, adaptive_tv=False
+        ).deblur(num_iter=5, lambda_tv=0.0)
+        assert isinstance(result, np.ndarray)
+        assert np.isfinite(result).all()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 12. _INIT_KEYS
 # ══════════════════════════════════════════════════════════════════════════════
 

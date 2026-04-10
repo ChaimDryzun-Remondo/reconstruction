@@ -1,105 +1,53 @@
 """
 Reconstruction — Modular deconvolution algorithms for satellite imagery.
 
-All algorithms share a common forward-model base class (:class:`~._base.DeconvBase`)
-that handles image preprocessing, padded-canvas construction, binary mask M for
-unknown-boundary masking, PSF conditioning and frequency-domain precomputation,
-and GPU/CPU backend selection.  Algorithm subclasses implement only the
-iteration loop.
-
-Quick start
------------
-One-shot wrapper (simplest interface)::
-
-    from Reconstruction import rl_deblur_unknown_boundary
-    result = rl_deblur_unknown_boundary(image, psf, iters=100)
-
-Class-based (fine-grained control over hyperparameters)::
-
-    from Reconstruction import RLUnknownBoundary
-    rl = RLUnknownBoundary(image, psf, padding_scale=3.0)
-    result = rl.deblur(num_iter=100, lambda_tv=0.0002)
-
-Backend selection::
-
-    from Reconstruction import set_backend
-    set_backend("gpu")   # use CuPy (requires cupy-cuda12x)
-    set_backend("cpu")   # force NumPy (default)
-    set_backend("auto")  # GPU if available, else CPU
-
-Algorithm summary
------------------
-+---------------------------+---------------------------+------------------------------------+-----------------------------------------------+
-| Algorithm                 | Class                     | Wrapper                            | Use case                                      |
-+===========================+===========================+====================================+===============================================+
-| Wiener filter             | WienerDeconv              | wiener_deblur                      | Fast single-pass baseline, linear             |
-+---------------------------+---------------------------+------------------------------------+-----------------------------------------------+
-| Richardson-Lucy (masked)  | RLUnknownBoundary         | rl_deblur_unknown_boundary         | Poisson noise, unknown boundaries             |
-+---------------------------+---------------------------+------------------------------------+-----------------------------------------------+
-| Landweber / FISTA         | LandweberUnknownBoundary  | landweber_deblur_unknown_boundary  | Gaussian noise, TV regularization, unknown    |
-|                           |                           |                                    | boundaries                                    |
-+---------------------------+---------------------------+------------------------------------+-----------------------------------------------+
-| ADMM-TV                   | ADMMDeconv                | admm_deblur                        | TV regularization, masked ADMM, extensible    |
-|                           |                           |                                    | prior interface                               |
-+---------------------------+---------------------------+------------------------------------+-----------------------------------------------+
-| TVAL3                     | TVAL3Deconv               | tval3_deblur                       | TV, exact FFT solve, adaptive spatially-      |
-|                           |                           |                                    | varying weights                               |
-+---------------------------+---------------------------+------------------------------------+-----------------------------------------------+
-| PnP-ADMM                  | PnPADMM                   | pnp_admm_deblur                    | BM3D denoiser prior; requires bm3d package    |
-+---------------------------+---------------------------+------------------------------------+-----------------------------------------------+
-| FISTA                     | FISTADeconv               | fista_deblur                       | TV / L1 / wavelet sparsity; textbook          |
-|                           |                           |                                    | Beck-Teboulle 2009; overridable prox step     |
-+---------------------------+---------------------------+------------------------------------+-----------------------------------------------+
-| Chambolle-Pock            | ChambollePockDeconv       | chambolle_pock_deblur              | TV; Condat-Vũ primal-dual forward-backward;   |
-| (Condat-Vũ)               |                           |                                    | isotropic / anisotropic TV; no proxG needed   |
-+---------------------------+---------------------------+------------------------------------+-----------------------------------------------+
-| RED-ADMM                  | REDDeconv                 | red_deblur                         | Regularization by Denoising [REM17]; BM3D     |
-|                           |                           |                                    | prior; fixed σ; requires bm3d package         |
-+---------------------------+---------------------------+------------------------------------+-----------------------------------------------+
-
-PnP-ADMM and RED-ADMM are conditionally available — they require
-``pip install bm3d``.  The rest of the package imports and runs without it.
+The package exposes a flat public API at the package root while keeping module
+imports lazy, so ``import Reconstruction`` succeeds even when optional
+dependencies are not installed.
 """
 from __future__ import annotations
 
-# ── Backend control ────────────────────────────────────────────────────────
-from ._backend import set_backend
+import importlib
+import importlib.util
 
-# ── Core algorithms ────────────────────────────────────────────────────────
-from .wiener import WienerDeconv, wiener_deblur
-from .rl_unknown_boundary import RLUnknownBoundary, rl_deblur_unknown_boundary
-from .landweber_unknown_boundary import (
-    LandweberUnknownBoundary,
-    landweber_deblur_unknown_boundary,
-)
-from .admm import ADMMDeconv, admm_deblur
-from .tval3 import TVAL3Deconv, tval3_deblur
-from .fista import FISTADeconv, fista_deblur
-from .chambolle_pock import ChambollePockDeconv, chambolle_pock_deblur
-
-# ── Optional BM3D-based algorithms (require bm3d) ─────────────────────────
-# The bm3d package is an optional dependency (pip install bm3d).
-# If it is not installed we silently skip both imports so that the package
-# is usable without BM3D.
-try:
-    from .pnp_admm import PnPADMM, pnp_admm_deblur
-    _HAS_PNP: bool = True
-except ImportError:
-    _HAS_PNP = False
-
-try:
-    from .red_admm import REDDeconv, red_deblur
-    _HAS_RED: bool = True
-except ImportError:
-    _HAS_RED = False
-
-# ── Public API ─────────────────────────────────────────────────────────────
 __version__: str = "0.1.0"
 
+_HAS_PNP: bool = importlib.util.find_spec("bm3d") is not None
+_HAS_RED: bool = _HAS_PNP
+
+_EXPORTS: dict[str, tuple[str, str]] = {
+    "set_backend": ("._backend", "set_backend"),
+    "WienerDeconv": (".wiener", "WienerDeconv"),
+    "wiener_deblur": (".wiener", "wiener_deblur"),
+    "RLUnknownBoundary": (".rl_unknown_boundary", "RLUnknownBoundary"),
+    "rl_deblur_unknown_boundary": (
+        ".rl_unknown_boundary",
+        "rl_deblur_unknown_boundary",
+    ),
+    "LandweberUnknownBoundary": (
+        ".landweber_unknown_boundary",
+        "LandweberUnknownBoundary",
+    ),
+    "landweber_deblur_unknown_boundary": (
+        ".landweber_unknown_boundary",
+        "landweber_deblur_unknown_boundary",
+    ),
+    "ADMMDeconv": (".admm", "ADMMDeconv"),
+    "admm_deblur": (".admm", "admm_deblur"),
+    "TVAL3Deconv": (".tval3", "TVAL3Deconv"),
+    "tval3_deblur": (".tval3", "tval3_deblur"),
+    "FISTADeconv": (".fista", "FISTADeconv"),
+    "fista_deblur": (".fista", "fista_deblur"),
+    "ChambollePockDeconv": (".chambolle_pock", "ChambollePockDeconv"),
+    "chambolle_pock_deblur": (".chambolle_pock", "chambolle_pock_deblur"),
+    "PnPADMM": (".pnp_admm", "PnPADMM"),
+    "pnp_admm_deblur": (".pnp_admm", "pnp_admm_deblur"),
+    "REDDeconv": (".red_admm", "REDDeconv"),
+    "red_deblur": (".red_admm", "red_deblur"),
+}
+
 __all__ = [
-    # backend control
     "set_backend",
-    # core classes
     "WienerDeconv",
     "RLUnknownBoundary",
     "LandweberUnknownBoundary",
@@ -107,7 +55,6 @@ __all__ = [
     "TVAL3Deconv",
     "FISTADeconv",
     "ChambollePockDeconv",
-    # core wrappers
     "wiener_deblur",
     "rl_deblur_unknown_boundary",
     "landweber_deblur_unknown_boundary",
@@ -115,7 +62,6 @@ __all__ = [
     "tval3_deblur",
     "fista_deblur",
     "chambolle_pock_deblur",
-    # package metadata
     "__version__",
 ]
 
@@ -124,3 +70,56 @@ if _HAS_PNP:
 
 if _HAS_RED:
     __all__ += ["REDDeconv", "red_deblur"]
+
+
+def _rewrite_import_error(symbol: str, exc: ImportError) -> ImportError:
+    missing = getattr(exc, "name", "") or ""
+
+    if (
+        symbol in {"PnPADMM", "pnp_admm_deblur", "REDDeconv", "red_deblur"}
+        and missing.startswith("bm3d")
+    ):
+        return ImportError(
+            f"{symbol} requires the optional 'bm3d' dependency. Install with: "
+            "pip install reconstruction[pnp] or pip install bm3d"
+        )
+
+    if missing.startswith("skimage"):
+        return ImportError(
+            "WienerDeconv automatic noise estimation requires the optional "
+            "'scikit-image' dependency. Install with: "
+            "pip install reconstruction[imaging] or pip install scikit-image"
+        )
+
+    if missing.startswith(("RemondoPythonCore", "Shared")):
+        return ImportError(
+            "Reconstruction solver modules require the shared preprocessing "
+            "utilities from 'RemondoPythonCore.Common' (preferred) or "
+            "'Shared.Common' (legacy). Install/use the full "
+            "RemondoPythonCore package layout before importing solver modules."
+        )
+
+    return exc
+
+
+def __getattr__(name: str):
+    if name in {"__version__", "_HAS_PNP", "_HAS_RED"}:
+        return globals()[name]
+
+    target = _EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    module_name, attr_name = target
+    try:
+        module = importlib.import_module(module_name, __name__)
+    except ImportError as exc:
+        raise _rewrite_import_error(name, exc) from exc
+
+    value = getattr(module, attr_name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals().keys()) | set(__all__) | {"_HAS_PNP", "_HAS_RED"})

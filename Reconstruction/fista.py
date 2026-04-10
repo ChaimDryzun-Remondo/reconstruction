@@ -59,7 +59,7 @@ from typing import Optional
 
 import numpy as np
 
-from ._backend import xp, rfft2, irfft2, _to_numpy
+from . import _backend as backend
 from ._base import DeconvBase
 
 logger = logging.getLogger(__name__)
@@ -262,9 +262,9 @@ class FISTADeconv(DeconvBase):
             # ── 1. Gradient ∇f(y_k) = H^T [ M ⊙ (H y_k − y) ] ─────────
             # Uses rfft2/irfft2 (real FFT, half-spectrum) throughout.
             # Always pass s=full_shape to irfft2 (even/odd ambiguity fix).
-            Hy_k  = irfft2(PF * rfft2(y_k), s=s)
+            Hy_k  = backend.irfft2(PF * backend.rfft2(y_k), s=s)
             resid = M * (Hy_k - y)
-            grad  = irfft2(cPF * rfft2(resid), s=s)
+            grad  = backend.irfft2(cPF * backend.rfft2(resid), s=s)
 
             # ── 2. Gradient step: z = y_k − τ ∇f(y_k) ──────────────────
             z = y_k - tau * grad
@@ -274,7 +274,7 @@ class FISTADeconv(DeconvBase):
 
             # ── 4. Positivity projection ─────────────────────────────────
             if nonneg_flag:
-                xp.maximum(x_new, xp.float32(0.0), out=x_new)
+                backend.xp.maximum(x_new, backend.xp.float32(0.0), out=x_new)
 
             # ── 5. Convergence check (before momentum update) ────────────
             if k >= min_iter and (k + 1) % check_every == 0:
@@ -290,7 +290,7 @@ class FISTADeconv(DeconvBase):
             # y_{k+1} = x_{k+1} + ((t_k − 1) / t_{k+1}) (x_{k+1} − x_k)
             t_new    = 0.5 * (1.0 + math.sqrt(1.0 + 4.0 * t_k * t_k))
             momentum = (t_k - 1.0) / t_new
-            y_new    = x_new + xp.float32(momentum) * (x_new - x_k)
+            y_new    = x_new + backend.xp.float32(momentum) * (x_new - x_k)
 
             # ── 7. O'Donoghue-Candès gradient restart [OC15 §3.1] ───────
             # Restart when consecutive iterate steps are opposed (angle > 90°):
@@ -299,7 +299,7 @@ class FISTADeconv(DeconvBase):
             # momentum is pointing against the descent direction.
             # Guard on k>0: at k=0, x_km1 == x_k (zero previous step).
             if k > 0:
-                ip = float(xp.sum((x_new - x_k) * (x_k - x_km1)))
+                ip = float(backend.xp.sum((x_new - x_k) * (x_k - x_km1)))
                 if ip < 0.0:
                     t_new = 1.0
                     y_new = x_new.copy()
@@ -324,11 +324,11 @@ class FISTADeconv(DeconvBase):
 
     def _prox_step(
         self,
-        z: xp.ndarray,
+        z: backend.xp.ndarray,
         threshold: float,
         reg_mode: str,
         tv_inner: int,
-    ) -> xp.ndarray:
+    ) -> backend.xp.ndarray:
         """
         Evaluate the proximal operator prox_{threshold, g}(z).
 
@@ -337,7 +337,7 @@ class FISTADeconv(DeconvBase):
 
         Parameters
         ----------
-        z : xp.ndarray
+        z : backend.xp.ndarray
             Gradient-step result y_k − τ ∇f(y_k).
         threshold : float
             τ × λ, the combined step-size × regularization weight.
@@ -348,7 +348,7 @@ class FISTADeconv(DeconvBase):
 
         Returns
         -------
-        xp.ndarray
+        backend.xp.ndarray
             Proximal evaluation, same shape and dtype as ``z``.
         """
         if reg_mode == "TV":
@@ -362,10 +362,10 @@ class FISTADeconv(DeconvBase):
 
     def _prox_tv(
         self,
-        z: xp.ndarray,
+        z: backend.xp.ndarray,
         gamma: float,
         n_inner: int,
-    ) -> xp.ndarray:
+    ) -> backend.xp.ndarray:
         """
         TV proximal operator via Chambolle dual projection [Cha04].
 
@@ -376,7 +376,7 @@ class FISTADeconv(DeconvBase):
 
         Parameters
         ----------
-        z : xp.ndarray
+        z : backend.xp.ndarray
             Input array.
         gamma : float
             τ × λ.
@@ -385,16 +385,16 @@ class FISTADeconv(DeconvBase):
 
         Returns
         -------
-        xp.ndarray
+        backend.xp.ndarray
         """
         from ._tv_operators import prox_tv_chambolle
         return prox_tv_chambolle(z, gamma=gamma, n_inner=n_inner)
 
     def _prox_l1(
         self,
-        z: xp.ndarray,
+        z: backend.xp.ndarray,
         threshold: float,
-    ) -> xp.ndarray:
+    ) -> backend.xp.ndarray:
         """
         Image-domain soft-thresholding (ℓ1 proximal).
 
@@ -402,23 +402,23 @@ class FISTADeconv(DeconvBase):
 
         Parameters
         ----------
-        z : xp.ndarray
+        z : backend.xp.ndarray
             Input array.
         threshold : float
             τ × λ.
 
         Returns
         -------
-        xp.ndarray, same dtype as z.
+        backend.xp.ndarray, same dtype as z.
         """
-        th = xp.float32(threshold)
-        return xp.sign(z) * xp.maximum(xp.abs(z) - th, xp.float32(0.0))
+        th = backend.xp.float32(threshold)
+        return backend.xp.sign(z) * backend.xp.maximum(backend.xp.abs(z) - th, backend.xp.float32(0.0))
 
     def _prox_l1_wavelet(
         self,
-        z: xp.ndarray,
+        z: backend.xp.ndarray,
         threshold: float,
-    ) -> xp.ndarray:
+    ) -> backend.xp.ndarray:
         """
         Wavelet-domain ℓ1 proximal via DWT shrinkage [CDL98].
 
@@ -432,14 +432,14 @@ class FISTADeconv(DeconvBase):
 
         Parameters
         ----------
-        z : xp.ndarray
+        z : backend.xp.ndarray
             Input array.
         threshold : float
             τ × λ.
 
         Returns
         -------
-        xp.ndarray, same shape and dtype as z.
+        backend.xp.ndarray, same shape and dtype as z.
         """
         if not _HAS_PYWT:
             raise ImportError(
@@ -448,7 +448,7 @@ class FISTADeconv(DeconvBase):
             )
 
         # GPU → CPU (no-op on CPU)
-        z_np = _to_numpy(z).astype(np.float64)
+        z_np = backend._to_numpy(z).astype(np.float64)
 
         # Forward DWT
         coeffs = _pywt.wavedec2(z_np, self._wavelet, level=self._levels)
@@ -470,7 +470,7 @@ class FISTADeconv(DeconvBase):
             result = result[: z_np.shape[0], : z_np.shape[1]]
 
         # CPU → GPU (no-op on CPU); match input dtype
-        return xp.array(result.astype(np.float32), dtype=z.dtype)
+        return backend.xp.array(result.astype(np.float32), dtype=z.dtype)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -34,7 +34,7 @@ from typing import Optional
 
 import numpy as np
 
-from ._backend import xp, rfft2, irfft2
+from . import _backend as backend
 from ._base import DeconvBase
 from ._tv_operators import prox_tv_chambolle
 
@@ -116,7 +116,7 @@ class LandweberUnknownBoundary(DeconvBase):
             Deconvolved image cropped to the original field of view.
         """
         num_iter = int(np.clip(num_iter, 1, 10000))
-        eps_pos  = xp.float32(epsilon_positivity)
+        eps_pos  = backend.xp.float32(epsilon_positivity)
         use_tv   = (lambda_tv is not None) and (float(lambda_tv) > 0.0)
         lam      = float(lambda_tv) if use_tv else 0.0
 
@@ -153,7 +153,7 @@ class LandweberUnknownBoundary(DeconvBase):
         if use_tv:
             if precondition:
                 htm_inside = HTM[M > 0.5]
-                htm_med    = float(xp.median(htm_inside))
+                htm_med    = float(backend.xp.median(htm_inside))
                 gamma_tv   = tau * lam / max(htm_med, 1e-12)
             else:
                 gamma_tv = tau * lam
@@ -170,9 +170,9 @@ class LandweberUnknownBoundary(DeconvBase):
 
             # ── Gradient of data fidelity at z_k ──────────────────────────
             # ∇f(z) = H^T [ M · (H z − y) ]
-            Hz       = irfft2(PF * rfft2(z_k), s=fshape)
+            Hz       = backend.irfft2(PF * backend.rfft2(z_k), s=fshape)
             residual = M * (Hz - y)
-            grad     = irfft2(conjPF * rfft2(residual), s=fshape)
+            grad     = backend.irfft2(conjPF * backend.rfft2(residual), s=fshape)
 
             # ── Gradient descent step ─────────────────────────────────────
             if precondition:
@@ -189,7 +189,7 @@ class LandweberUnknownBoundary(DeconvBase):
 
             # ── Positivity projection ─────────────────────────────────────
             if enforce_positivity:
-                xp.maximum(x_new, eps_pos, out=x_new)
+                backend.xp.maximum(x_new, eps_pos, out=x_new)
 
             # ── FISTA momentum update ─────────────────────────────────────
             t_new    = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t_k * t_k))
@@ -200,7 +200,7 @@ class LandweberUnknownBoundary(DeconvBase):
             if adaptive_restart and k > 0:
                 dx_new = x_new - x_k
                 dx_old = x_k   - x_km1
-                ip     = float(xp.sum(dx_new * dx_old))
+                ip     = float(backend.xp.sum(dx_new * dx_old))
                 if ip < 0.0:
                     t_new    = 1.0
                     momentum = 0.0

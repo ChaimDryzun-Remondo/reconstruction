@@ -41,17 +41,9 @@ from typing import Literal, Optional, Union
 import numpy as np
 from scipy.signal import convolve2d as _cpu_convolve2d
 
-from skimage.restoration import estimate_sigma
-
-from ._backend import xp, rfft2, irfft2, ifftshift, _freeze, _to_numpy, _use_gpu
+from . import _backend as backend
 from ._base import DeconvBase
-from Shared.Common.General_Utilities import padding, cropping
-from Shared.Common.PSF_Preprocessing import psf_preprocess, condition_psf
-
-if _use_gpu:
-    from cupyx.scipy.ndimage import uniform_filter as _uniform_filter  # type: ignore[import]
-else:
-    from scipy.ndimage import uniform_filter as _uniform_filter
+from ._common import padding, cropping, psf_preprocess, condition_psf
 
 logger = logging.getLogger(__name__)
 
@@ -215,43 +207,45 @@ class WienerDeconv(DeconvBase):
             taper_outer_frac=0.90,
             taper_end_frac=1.0,
         )
-        psf_pad: "xp.ndarray" = xp.array(
+        psf_pad: "backend.xp.ndarray" = backend.xp.array(
             padding(image=psf_np, full_size=self.full_shape, Type="Zero", apply_taper=False),
-            dtype=xp.float32,
+            dtype=backend.xp.float32,
         )
-        psf_pad = ifftshift(psf_pad)
+        psf_pad = backend.ifftshift(psf_pad)
 
         # Overwrite the PF/conjPF set by the base class.
-        self.PF = _freeze(rfft2(psf_pad))
-        self.conjPF = _freeze(self.PF.conj())
-        self.conj_psf_F: "xp.ndarray" = self.conjPF  # alias used by deblur
-        self.psf_F2: "xp.ndarray" = _freeze(xp.abs(self.PF) ** 2)
+        self.PF = backend._freeze(backend.rfft2(psf_pad))
+        self.conjPF = backend._freeze(self.PF.conj())
+        self.conj_psf_F: "backend.xp.ndarray" = self.conjPF  # alias used by deblur
+        self.psf_F2: "backend.xp.ndarray" = backend._freeze(backend.xp.abs(self.PF) ** 2)
 
         # ── Image spectrum ─────────────────────────────────────────────────
         # rfft2 of the padded, tapered, normalised image.
-        self.obj_F: "xp.ndarray" = rfft2(self.image)
+        self.obj_F: "backend.xp.ndarray" = backend.rfft2(self.image)
 
         # ── Laplacian spectrum ─────────────────────────────────────────────
-        lap_pad: "xp.ndarray" = xp.array(
+        lap_pad: "backend.xp.ndarray" = backend.xp.array(
             padding(
                 image=_LAPL_NP.astype(np.float32),
                 full_size=self.full_shape,
                 Type="Zero",
                 apply_taper=False,
             ),
-            dtype=xp.float32,
+            dtype=backend.xp.float32,
         )
-        lap_pad = ifftshift(lap_pad)
-        self.L2: "xp.ndarray" = _freeze(xp.abs(rfft2(lap_pad)) ** 2)
+        lap_pad = backend.ifftshift(lap_pad)
+        self.L2: "backend.xp.ndarray" = backend._freeze(backend.xp.abs(backend.rfft2(lap_pad)) ** 2)
 
         # ── Unpadded grayscale ─────────────────────────────────────────────
         # self.image is the full padded canvas; crop back to original size.
-        gray_np: np.ndarray = cropping(_to_numpy(self.image), (self.h, self.w))
-        self.gray: "xp.ndarray" = xp.array(gray_np, dtype=xp.float32)
+        gray_np: np.ndarray = cropping(backend._to_numpy(self.image), (self.h, self.w))
+        self.gray: "backend.xp.ndarray" = backend.xp.array(
+            gray_np, dtype=backend.xp.float32
+        )
 
         # ── Diagnostic floor & state ───────────────────────────────────────
         self.eps: float = 1e-8
-        self._last_alpha: Optional[Union[float, "xp.ndarray"]] = None
+        self._last_alpha: Optional[Union[float, "backend.xp.ndarray"]] = None
         self._sigma_est: Optional[float] = None
 
     # ── Noise estimation ───────────────────────────────────────────────────
@@ -268,7 +262,16 @@ class WienerDeconv(DeconvBase):
         float
             Estimated per-pixel noise standard deviation (normalised units).
         """
-        gray_np = _to_numpy(self.gray)
+        try:
+            from skimage.restoration import estimate_sigma
+        except ImportError as exc:
+            raise ImportError(
+                "WienerDeconv automatic noise estimation requires the optional "
+                "'scikit-image' dependency. Install with: "
+                "pip install reconstruction[imaging] or pip install scikit-image"
+            ) from exc
+
+        gray_np = backend._to_numpy(self.gray)
         return float(estimate_sigma(gray_np, channel_axis=None, average_sigmas=True))
 
     # ── Auto alpha for Tikhonov mode ───────────────────────────────────────
@@ -307,7 +310,7 @@ class WienerDeconv(DeconvBase):
         float
         """
         # Always use CPU/scipy — result is a scalar; no GPU needed here.
-        gray_np = _to_numpy(gray).astype(np.float64)
+        gray_np = backend._to_numpy(gray).astype(np.float64)
         lap_np = np.asarray(lap_kernel, dtype=np.float64)
 
         z: np.ndarray = _cpu_convolve2d(gray_np, lap_np, mode="same", boundary="symm")
@@ -374,40 +377,45 @@ class WienerDeconv(DeconvBase):
             else:  # Spectrum
                 N = self.full_shape[0] * self.full_shape[1]
                 # PSD of observed image: Syy = |Y|² / N
-                Syy: "xp.ndarray" = xp.abs(self.obj_F) ** 2 / N
+                if backend._use_gpu:
+                    from cupyx.scipy.ndimage import uniform_filter as uniform_filter  # type: ignore[import]
+                else:
+                    from scipy.ndimage import uniform_filter
+
+                Syy: "backend.xp.ndarray" = backend.xp.abs(self.obj_F) ** 2 / N
                 Snn_psd: float = sigma ** 2
                 # Signal PSD estimate: Sxx = (Syy - Snn) / |H|²
-                Sxx: "xp.ndarray" = xp.maximum(
-                    (Syy - Snn_psd) / xp.maximum(self.psf_F2, 1e-10),
+                Sxx: "backend.xp.ndarray" = backend.xp.maximum(
+                    (Syy - Snn_psd) / backend.xp.maximum(self.psf_F2, 1e-10),
                     1e-10,
                 )
-                alpha_map: "xp.ndarray" = Snn_psd / Sxx
+                alpha_map: "backend.xp.ndarray" = Snn_psd / Sxx
                 # Smooth in log domain to suppress variance.
-                log_alpha = xp.log(alpha_map)
-                log_alpha = _uniform_filter(log_alpha.real, size=3)
-                alpha = xp.exp(log_alpha)
+                log_alpha = backend.xp.log(alpha_map)
+                log_alpha = uniform_filter(log_alpha.real, size=3)
+                alpha = backend.xp.exp(log_alpha)
 
         else:
             # Manual alpha: ensure on correct device for Spectrum mode.
             if self.mode == "Spectrum":
-                alpha = xp.asarray(alpha)
+                alpha = backend.xp.asarray(alpha)
 
         # Cache for diagnostic access.
         self._last_alpha = alpha
 
         # ── Step 2: Build filter denominator ─────────────────────────────
         if self.mode == "Tikhonov":
-            denom: "xp.ndarray" = self.psf_F2 + alpha * self.L2
+            denom: "backend.xp.ndarray" = self.psf_F2 + alpha * self.L2
             # Floor at eps × max(denom) to prevent blow-up at OTF zeros.
-            denom = xp.maximum(denom, self.eps * float(xp.max(denom)))
+            denom = backend.xp.maximum(denom, self.eps * float(backend.xp.max(denom)))
         elif self.mode == "Classical":
             denom = self.psf_F2 + alpha
         else:  # Spectrum
             denom = self.psf_F2 + alpha
 
         # ── Step 3: Apply filter ──────────────────────────────────────────
-        X_F: "xp.ndarray" = self.conj_psf_F * self.obj_F / denom
-        x: "xp.ndarray" = irfft2(X_F, s=self.full_shape)
+        X_F: "backend.xp.ndarray" = self.conj_psf_F * self.obj_F / denom
+        x: "backend.xp.ndarray" = backend.irfft2(X_F, s=self.full_shape)
 
         # ── Step 4: Crop and return ───────────────────────────────────────
         return self._crop_and_return(x)
@@ -426,7 +434,7 @@ class WienerDeconv(DeconvBase):
             return None
         if isinstance(self._last_alpha, (int, float)):
             return self._last_alpha
-        return _to_numpy(self._last_alpha)
+        return backend._to_numpy(self._last_alpha)
 
     @property
     def sigma_est(self) -> Optional[float]:

@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import logging
 
-from ._backend import xp
+from . import _backend as backend
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 #   ∇  = forward differences,  last row/col = 0    (Neumann)
 #   div = backward differences, adjoint of −∇
 
-def forward_grad(x: xp.ndarray) -> tuple[xp.ndarray, xp.ndarray]:
+def forward_grad(x: backend.xp.ndarray) -> tuple[backend.xp.ndarray, backend.xp.ndarray]:
     """
     Discrete gradient with forward differences and Neumann BC.
 
@@ -75,23 +75,23 @@ def forward_grad(x: xp.ndarray) -> tuple[xp.ndarray, xp.ndarray]:
 
     Parameters
     ----------
-    x : xp.ndarray, shape (H, W)
+    x : backend.xp.ndarray, shape (H, W)
         Input 2-D array (image or auxiliary variable).
 
     Returns
     -------
-    dh, dw : xp.ndarray, each shape (H, W)
+    dh, dw : backend.xp.ndarray, each shape (H, W)
         Vertical (row) and horizontal (column) partial derivatives.
         Last row of ``dh`` and last column of ``dw`` are zero (Neumann BC).
     """
-    dh = xp.zeros_like(x)
-    dw = xp.zeros_like(x)
+    dh = backend.xp.zeros_like(x)
+    dw = backend.xp.zeros_like(x)
     dh[:-1, :] = x[1:, :] - x[:-1, :]    # ∂x/∂h; last row = 0
     dw[:, :-1] = x[:, 1:] - x[:, :-1]    # ∂x/∂w; last col = 0
     return dh, dw
 
 
-def backward_div(p_h: xp.ndarray, p_w: xp.ndarray) -> xp.ndarray:
+def backward_div(p_h: backend.xp.ndarray, p_w: backend.xp.ndarray) -> backend.xp.ndarray:
     """
     Discrete divergence with backward differences (adjoint of −∇).
 
@@ -111,15 +111,15 @@ def backward_div(p_h: xp.ndarray, p_w: xp.ndarray) -> xp.ndarray:
 
     Parameters
     ----------
-    p_h, p_w : xp.ndarray, each shape (H, W)
+    p_h, p_w : backend.xp.ndarray, each shape (H, W)
         Vertical and horizontal components of a 2-D vector field.
 
     Returns
     -------
-    div : xp.ndarray, shape (H, W)
+    div : backend.xp.ndarray, shape (H, W)
         ``div(p) = bwd_h(p_h) + bwd_w(p_w)``.
     """
-    div = xp.empty_like(p_h)
+    div = backend.xp.empty_like(p_h)
 
     # ── Vertical component: backward difference of p_h ────────────────────
     div[0, :]    = p_h[0, :]
@@ -151,7 +151,7 @@ def backward_div(p_h: xp.ndarray, p_w: xp.ndarray) -> xp.ndarray:
 #   ∇_per  = forward differences with wrap-around at the last row/col
 #   div_per = backward differences with wrap-around; adjoint of −∇_per
 
-def forward_grad_periodic(x: "xp.ndarray") -> "tuple[xp.ndarray, xp.ndarray]":
+def forward_grad_periodic(x: "backend.xp.ndarray") -> "tuple[backend.xp.ndarray, backend.xp.ndarray]":
     """
     Discrete gradient with forward differences and periodic (wrap-around) BC.
 
@@ -175,12 +175,12 @@ def forward_grad_periodic(x: "xp.ndarray") -> "tuple[xp.ndarray, xp.ndarray]":
 
     Parameters
     ----------
-    x : xp.ndarray, shape (H, W)
+    x : backend.xp.ndarray, shape (H, W)
         Input 2-D array.
 
     Returns
     -------
-    dh, dw : xp.ndarray, each shape (H, W)
+    dh, dw : backend.xp.ndarray, each shape (H, W)
         Vertical (row) and horizontal (column) partial derivatives with
         periodic wrap-around at the last row/column.
 
@@ -189,8 +189,8 @@ def forward_grad_periodic(x: "xp.ndarray") -> "tuple[xp.ndarray, xp.ndarray]":
     forward_grad : Neumann BC variant (zero at boundaries).
     backward_div_periodic : Adjoint of −∇_per.
     """
-    dh = xp.empty_like(x)
-    dw = xp.empty_like(x)
+    dh = backend.xp.empty_like(x)
+    dw = backend.xp.empty_like(x)
 
     # Vertical forward differences with periodic wrap
     dh[:-1, :] = x[1:, :] - x[:-1, :]   # interior rows
@@ -204,9 +204,9 @@ def forward_grad_periodic(x: "xp.ndarray") -> "tuple[xp.ndarray, xp.ndarray]":
 
 
 def backward_div_periodic(
-    p_h: "xp.ndarray",
-    p_w: "xp.ndarray",
-) -> "xp.ndarray":
+    p_h: "backend.xp.ndarray",
+    p_w: "backend.xp.ndarray",
+) -> "backend.xp.ndarray":
     """
     Discrete divergence with periodic BC (adjoint of −∇_per).
 
@@ -218,7 +218,7 @@ def backward_div_periodic(
 
     and analogously for ``bwd_w_per`` along columns.
 
-    Equivalently, using ``xp.roll``:
+    Equivalently, using ``backend.xp.roll``:
 
         div_h = p_h − roll(p_h, shift=+1, axis=0)
         div_w = p_w − roll(p_w, shift=+1, axis=1)
@@ -233,12 +233,12 @@ def backward_div_periodic(
 
     Parameters
     ----------
-    p_h, p_w : xp.ndarray, each shape (H, W)
+    p_h, p_w : backend.xp.ndarray, each shape (H, W)
         Vertical and horizontal components of a 2-D vector field.
 
     Returns
     -------
-    div : xp.ndarray, shape (H, W)
+    div : backend.xp.ndarray, shape (H, W)
         ``div_per(p) = bwd_h_per(p_h) + bwd_w_per(p_w)``.
 
     Notes
@@ -254,8 +254,8 @@ def backward_div_periodic(
     """
     # Backward difference = p − shifted(p), where shift=+1 pulls p[i-1]
     # to position i (equivalently, shift by +1 ≡ p[i] - p[i-1] with wrap).
-    div_h = p_h - xp.roll(p_h, shift=1, axis=0)
-    div_w = p_w - xp.roll(p_w, shift=1, axis=1)
+    div_h = p_h - backend.xp.roll(p_h, shift=1, axis=0)
+    div_w = p_w - backend.xp.roll(p_w, shift=1, axis=1)
     return div_h + div_w
 
 
@@ -264,10 +264,10 @@ def backward_div_periodic(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def tv_multiplicative_correction(
-    x: xp.ndarray,
+    x: backend.xp.ndarray,
     lambda_tv: float,
     eps_grad: float = 1e-8,
-) -> xp.ndarray:
+) -> backend.xp.ndarray:
     """
     Compute the Dey et al. multiplicative TV correction factor.
 
@@ -313,7 +313,7 @@ def tv_multiplicative_correction(
 
     Parameters
     ----------
-    x : xp.ndarray, shape (H, W), float32
+    x : backend.xp.ndarray, shape (H, W), float32
         Current image estimate.  Must be non-negative.
     lambda_tv : float
         TV regularization strength.  Typical range for [0, 1]-normalized
@@ -324,7 +324,7 @@ def tv_multiplicative_correction(
 
     Returns
     -------
-    xp.ndarray, shape (H, W), float32
+    backend.xp.ndarray, shape (H, W), float32
         The correction factor ``C(x) = 1 - λ · div(∇x / |∇x|_ε)``.
         The caller divides the standard RL update by this array.
 
@@ -348,7 +348,7 @@ def tv_multiplicative_correction(
     # The ε² term prevents division by zero where ∇x ≈ 0 (flat regions).
     # This is standard in TV implementations and corresponds to the Huber
     # approximation of the L1 norm near the origin.
-    mag = xp.sqrt(dh * dh + dw * dw + eps_grad * eps_grad)
+    mag = backend.xp.sqrt(dh * dh + dw * dw + eps_grad * eps_grad)
 
     # ── Normalized gradient field  n = ∇x / |∇x|_ε ──────────────────────
     # In flat regions, mag ≈ eps_grad and (dh, dw) ≈ 0, so n ≈ 0 —
@@ -370,7 +370,7 @@ def tv_multiplicative_correction(
     # to guarantee the correction is at most a factor-of-2 amplification.
     correction = 1.0 - lambda_tv * div
 
-    xp.clip(correction, a_min=0.5, a_max=None, out=correction)
+    backend.xp.clip(correction, a_min=0.5, a_max=None, out=correction)
 
     return correction
 
@@ -380,11 +380,11 @@ def tv_multiplicative_correction(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def prox_tv_chambolle(
-    v: xp.ndarray,
+    v: backend.xp.ndarray,
     gamma: float,
     n_inner: int = 50,
     tau_dual: float = 0.125,
-) -> xp.ndarray:
+) -> backend.xp.ndarray:
     """
     Compute the proximal operator of γ · TV(·) at point v.
 
@@ -418,7 +418,7 @@ def prox_tv_chambolle(
 
     Parameters
     ----------
-    v : xp.ndarray, shape (H, W), float32
+    v : backend.xp.ndarray, shape (H, W), float32
         The point at which to evaluate the proximal operator (typically
         the result of a gradient descent step on the data fidelity term).
     gamma : float
@@ -433,7 +433,7 @@ def prox_tv_chambolle(
 
     Returns
     -------
-    xp.ndarray, shape (H, W), float32
+    backend.xp.ndarray, shape (H, W), float32
         The TV-denoised image prox_{γ TV}(v).
 
     References
@@ -444,11 +444,11 @@ def prox_tv_chambolle(
     if gamma <= 0.0:
         return v.copy()
 
-    inv_gamma = xp.float32(1.0 / gamma)
+    inv_gamma = backend.xp.float32(1.0 / gamma)
 
     # Dual variables — a 2-component vector field, initialised to zero.
-    p_h = xp.zeros_like(v)
-    p_w = xp.zeros_like(v)
+    p_h = backend.xp.zeros_like(v)
+    p_w = backend.xp.zeros_like(v)
 
     for _ in range(n_inner):
         # 1. Compute u_current = v − γ · div(p)   (primal from current dual)
@@ -466,9 +466,9 @@ def prox_tv_chambolle(
         p_w_new = p_w + tau_dual * g_w
 
         # Pointwise magnitude
-        mag = xp.sqrt(p_h_new * p_h_new + p_w_new * p_w_new)
+        mag = backend.xp.sqrt(p_h_new * p_h_new + p_w_new * p_w_new)
         # Project: divide by max(1, |p|) to enforce |p| ≤ 1
-        mag = xp.maximum(mag, 1.0)
+        mag = backend.xp.maximum(mag, 1.0)
 
         p_h = p_h_new / mag
         p_w = p_w_new / mag

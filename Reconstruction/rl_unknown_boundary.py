@@ -21,7 +21,7 @@ import logging
 
 import numpy as np
 
-from ._backend import xp, rfft2, irfft2
+from . import _backend as backend
 from ._base import DeconvBase
 from ._tv_operators import tv_multiplicative_correction
 
@@ -78,8 +78,8 @@ class RLUnknownBoundary(DeconvBase):
             Deconvolved image cropped to the original field of view.
         """
         num_iter = int(np.clip(num_iter, 1, 10000))
-        eps_dev = xp.float32(epsilon_division)
-        eps_pos = xp.float32(epsilon_positivity)
+        eps_dev = backend.xp.float32(epsilon_division)
+        eps_pos = backend.xp.float32(epsilon_positivity)
         use_tv = (lambda_tv is not None) and (float(lambda_tv) > 0.0)
         lam = float(lambda_tv)
 
@@ -95,14 +95,14 @@ class RLUnknownBoundary(DeconvBase):
         for k in range(num_iter):
 
             # ── Step 1: Forward model H x_k ──────────────────────────────
-            Hx_k = irfft2(PF * rfft2(x_k), s=fshape)
+            Hx_k = backend.irfft2(PF * backend.rfft2(x_k), s=fshape)
 
             # ── Step 2: Ratio on observed support Ω ──────────────────────
             # Outside Ω (M=0): numerator=0, denominator≈1 → ratio≈0.
             ratio = (M * y) / ((Hx_k * M) + ((1.0 - M) + eps_dev))
 
             # ── Step 3: Back-projection H^T ratio ────────────────────────
-            back = irfft2(conjPF * rfft2(ratio), s=fshape)
+            back = backend.irfft2(conjPF * backend.rfft2(ratio), s=fshape)
 
             # ── Step 4: Mask-normalised RL update ────────────────────────
             x_new = x_k * (back / (HTM + eps_dev))
@@ -117,7 +117,7 @@ class RLUnknownBoundary(DeconvBase):
                     x_new = x_new / (1.0 + (correction - 1.0) * M)
 
             # ── Step 6: Positivity projection ────────────────────────────
-            xp.maximum(x_new, eps_pos, out=x_new)
+            backend.xp.maximum(x_new, eps_pos, out=x_new)
 
             # ── Step 7: Convergence check ─────────────────────────────────
             if k >= min_iter and (k + 1) % check_every == 0:

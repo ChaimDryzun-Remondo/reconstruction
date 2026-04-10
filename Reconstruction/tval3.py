@@ -63,13 +63,7 @@ from typing import Optional
 
 import numpy as np
 
-from ._backend import (
-    xp,
-    fft2, ifft2, fftfreq,
-    rfft2, irfft2,
-    ifftshift,
-    _freeze, _to_numpy,
-)
+from . import _backend as backend
 from ._base import DeconvBase
 from ._tv_operators import forward_grad_periodic, backward_div_periodic
 
@@ -149,19 +143,42 @@ class TVAL3Deconv(DeconvBase):
         # use_mask=True by default (access to self.mask required for v-update).
         super().__init__(image, psf, **kwargs)
 
+        if mu <= 0.0:
+            raise ValueError(f"mu must be positive, got {mu!r}")
+        if mu_max <= 0.0:
+            raise ValueError(f"mu_max must be positive, got {mu_max!r}")
+        if mu_min <= 0.0:
+            raise ValueError(f"mu_min must be positive, got {mu_min!r}")
+        if mu_min > mu_max:
+            raise ValueError(
+                f"mu_min must be <= mu_max, got mu_min={mu_min!r}, "
+                f"mu_max={mu_max!r}"
+            )
+        if mu_factor <= 0.0:
+            raise ValueError(f"mu_factor must be positive, got {mu_factor!r}")
+        if TVnorm not in (1, 2):
+            raise ValueError(
+                f"TVnorm must be 1 or 2, got {TVnorm!r}. "
+                "Use 2 for isotropic TV or 1 for anisotropic TV."
+            )
+        if not (0.0 <= burn_in_frac <= 1.0):
+            raise ValueError(
+                f"burn_in_frac must be in [0, 1], got {burn_in_frac!r}"
+            )
+
         # ── Full complex PSF spectrum in float64 ───────────────────────────
         # Recover the spatial (ifftshifted) PSF from the base-class rfft2
         # precomputation, cast to float64, then compute full M×N complex FFT.
         # This avoids duplicating the PSF preprocessing pipeline.
-        psf_spatial: xp.ndarray = irfft2(
+        psf_spatial: "backend.xp.ndarray" = backend.irfft2(
             self.PF, s=self.full_shape
-        ).astype(xp.float64)
+        ).astype(backend.xp.float64)
 
-        H_full = fft2(psf_spatial)
-        self.H_full: xp.ndarray = _freeze(H_full)
-        self.H_conj_full: xp.ndarray = _freeze(H_full.conj().copy())
-        self.H_H_conj: xp.ndarray = _freeze(
-            xp.real(self.H_conj_full * self.H_full).copy()
+        H_full = backend.fft2(psf_spatial)
+        self.H_full: "backend.xp.ndarray" = backend._freeze(H_full)
+        self.H_conj_full: "backend.xp.ndarray" = backend._freeze(H_full.conj().copy())
+        self.H_H_conj: "backend.xp.ndarray" = backend._freeze(
+            backend.xp.real(self.H_conj_full * self.H_full).copy()
         )
 
         # ── Laplacian eigenvalue tensor (periodic BC) ──────────────────────
@@ -169,11 +186,11 @@ class TVAL3Deconv(DeconvBase):
         # These are the eigenvalues of G^TG for the forward-difference gradient
         # G under periodic BC.  Required for the exact FFT x-solve.
         M_f, N_f = self.full_shape
-        fy = fftfreq(M_f).reshape(-1, 1).astype(xp.float64)
-        fx = fftfreq(N_f).reshape(1, -1).astype(xp.float64)
-        self.lap_fft: xp.ndarray = _freeze(
-            (4.0 - 2.0 * xp.cos(2.0 * xp.pi * fy)
-             - 2.0 * xp.cos(2.0 * xp.pi * fx)).copy()
+        fy = backend.fftfreq(M_f).reshape(-1, 1).astype(backend.xp.float64)
+        fx = backend.fftfreq(N_f).reshape(1, -1).astype(backend.xp.float64)
+        self.lap_fft: "backend.xp.ndarray" = backend._freeze(
+            (4.0 - 2.0 * backend.xp.cos(2.0 * backend.xp.pi * fy)
+             - 2.0 * backend.xp.cos(2.0 * backend.xp.pi * fx)).copy()
         )
 
         logger.debug(
@@ -227,12 +244,12 @@ class TVAL3Deconv(DeconvBase):
         """
         if tvnorm == 1:
             return (
-                xp.sign(x) * xp.maximum(xp.abs(x) - thresh, 0.0),
-                xp.sign(y) * xp.maximum(xp.abs(y) - thresh, 0.0),
+                backend.xp.sign(x) * backend.xp.maximum(backend.xp.abs(x) - thresh, 0.0),
+                backend.xp.sign(y) * backend.xp.maximum(backend.xp.abs(y) - thresh, 0.0),
             )
         else:
-            mag = xp.sqrt(x * x + y * y)
-            scale = xp.maximum(mag - thresh, 0.0) / (mag + eps)
+            mag = backend.xp.sqrt(x * x + y * y)
+            scale = backend.xp.maximum(mag - thresh, 0.0) / (mag + eps)
             return scale * x, scale * y
 
     def _compute_edge_map(
@@ -258,13 +275,13 @@ class TVAL3Deconv(DeconvBase):
             Flat regions → λ   (full smoothing).
         """
         dx, dy = forward_grad_periodic(u)
-        edge = xp.sqrt(dx * dx + dy * dy + 1e-8)
+        edge = backend.xp.sqrt(dx * dx + dy * dy + 1e-8)
         e_min = float(edge.min())
         e_max = float(edge.max())
         if e_max > e_min:
             edge = (edge - e_min) / (e_max - e_min)
         else:
-            edge = xp.zeros_like(edge)
+            edge = backend.xp.zeros_like(edge)
         return lambda_tv * (1.0 - 0.8 * edge)
 
     def _compute_cost(
@@ -293,13 +310,18 @@ class TVAL3Deconv(DeconvBase):
         -------
         float
         """
-        mask_f64 = self.mask.astype(xp.float64)
-        y_f64 = self.image.astype(xp.float64)
-        data_term = 0.5 * float(xp.sum((mask_f64 * (Hx - y_f64)) ** 2))
+        mask_f64 = self.mask.astype(backend.xp.float64)
+        y_f64 = self.image.astype(backend.xp.float64)
+        data_term = 0.5 * float(backend.xp.sum((mask_f64 * (Hx - y_f64)) ** 2))
         if tvnorm == 1:
-            tv_term = float(xp.sum(xp.abs(w_h)) + xp.sum(xp.abs(w_w)))
+            tv_term = float(
+                backend.xp.sum(backend.xp.abs(w_h))
+                + backend.xp.sum(backend.xp.abs(w_w))
+            )
         else:
-            tv_term = float(xp.sum(xp.sqrt(w_h * w_h + w_w * w_w + 1e-12)))
+            tv_term = float(
+                backend.xp.sum(backend.xp.sqrt(w_h * w_h + w_w * w_w + 1e-12))
+            )
         return data_term + lambda_tv * tv_term
 
     def _check_tval3_convergence(
@@ -334,17 +356,17 @@ class TVAL3Deconv(DeconvBase):
         r_dual : float
             ρ_v||v−v_old|| + ρ_w||w−w_old||  (combined dual residual).
         """
-        r_v = float(xp.linalg.norm(Hx - v))
-        r_wx = float(xp.linalg.norm(dx - w_h))
-        r_wy = float(xp.linalg.norm(dy - w_w))
-        r_primal = float(xp.sqrt(r_v ** 2 + r_wx ** 2 + r_wy ** 2))
+        r_v = float(backend.xp.linalg.norm(Hx - v))
+        r_wx = float(backend.xp.linalg.norm(dx - w_h))
+        r_wy = float(backend.xp.linalg.norm(dy - w_w))
+        r_primal = float(backend.xp.sqrt(r_v ** 2 + r_wx ** 2 + r_wy ** 2))
 
-        r_dv = rho_v * float(xp.linalg.norm(v - v_old))
-        r_dwx = rho_w * float(xp.linalg.norm(w_h - w_h_old))
-        r_dwy = rho_w * float(xp.linalg.norm(w_w - w_w_old))
-        r_dual = float(xp.sqrt(r_dv ** 2 + r_dwx ** 2 + r_dwy ** 2))
+        r_dv = rho_v * float(backend.xp.linalg.norm(v - v_old))
+        r_dwx = rho_w * float(backend.xp.linalg.norm(w_h - w_h_old))
+        r_dwy = rho_w * float(backend.xp.linalg.norm(w_w - w_w_old))
+        r_dual = float(backend.xp.sqrt(r_dv ** 2 + r_dwx ** 2 + r_dwy ** 2))
 
-        scale = float(xp.linalg.norm(u)) + _EPSILON
+        scale = float(backend.xp.linalg.norm(u)) + _EPSILON
         rel_change = max(r_primal, r_dual) / scale
         converged = rel_change < tol
         return converged, rel_change, r_primal, r_dual
@@ -397,37 +419,57 @@ class TVAL3Deconv(DeconvBase):
         np.ndarray, shape (self.h, self.w)
             Deconvolved image cropped to the original FOV, on CPU.
         """
+        if num_iter < 1:
+            raise ValueError(f"num_iter must be >= 1, got {num_iter!r}")
+        if lambda_tv < 0.0:
+            raise ValueError(f"lambda_tv must be >= 0, got {lambda_tv!r}")
+        if tol < 0.0:
+            raise ValueError(f"tol must be >= 0, got {tol!r}")
+        if min_iter < 0:
+            raise ValueError(f"min_iter must be >= 0, got {min_iter!r}")
+        if check_every < 1:
+            raise ValueError(f"check_every must be >= 1, got {check_every!r}")
+
         # ── Resolve per-call overrides ─────────────────────────────────────
         _nonneg = self.nonneg if nonneg is None else bool(nonneg)
         _adaptive = self.adaptive_tv if adaptive_tv is None else bool(adaptive_tv)
         _burn = self.burn_in_frac if burn_in_frac is None else float(burn_in_frac)
         _tvnorm = self.TVnorm if TVnorm is None else int(TVnorm)
+        if _tvnorm not in (1, 2):
+            raise ValueError(
+                f"TVnorm must be 1 or 2, got {_tvnorm!r}. "
+                "Use 2 for isotropic TV or 1 for anisotropic TV."
+            )
+        if not (0.0 <= _burn <= 1.0):
+            raise ValueError(f"burn_in_frac must be in [0, 1], got {_burn!r}")
         burn_in_iters = max(1, int(_burn * num_iter))
 
         # ── Precision constants ────────────────────────────────────────────
         eps = _EPSILON
-        eps_pos = xp.float64(1e-8)
+        eps_pos = backend.xp.float64(1e-8)
 
         # ── Adaptive penalty state (rho_v adapts; rho_w is fixed) ─────────
         rho_v: float = self.mu
         rho_w: float = self.mu
 
         # ── Initialise state in float64 ────────────────────────────────────
-        u: xp.ndarray = self.estimated_image.astype(xp.float64).copy()
-        mask_f64: xp.ndarray = self.mask.astype(xp.float64)
-        y_f64: xp.ndarray = self.image.astype(xp.float64)
+        u: "backend.xp.ndarray" = self.estimated_image.astype(backend.xp.float64).copy()
+        mask_f64: "backend.xp.ndarray" = self.mask.astype(backend.xp.float64)
+        y_f64: "backend.xp.ndarray" = self.image.astype(backend.xp.float64)
 
         # Initial forward pass and gradient
-        Hx_k: xp.ndarray = xp.real(ifft2(self.H_full * fft2(u)))
+        Hx_k: "backend.xp.ndarray" = backend.xp.real(
+            backend.ifft2(self.H_full * backend.fft2(u))
+        )
         dx, dy = forward_grad_periodic(u)
 
         # Initialise auxiliary and dual variables
-        v: xp.ndarray = Hx_k.copy()
-        w_h: xp.ndarray = dx.copy()
-        w_w: xp.ndarray = dy.copy()
-        d_v: xp.ndarray = xp.zeros_like(u)
-        d_w_h: xp.ndarray = xp.zeros_like(u)
-        d_w_w: xp.ndarray = xp.zeros_like(u)
+        v: "backend.xp.ndarray" = Hx_k.copy()
+        w_h: "backend.xp.ndarray" = dx.copy()
+        w_w: "backend.xp.ndarray" = dy.copy()
+        d_v: "backend.xp.ndarray" = backend.xp.zeros_like(u)
+        d_w_h: "backend.xp.ndarray" = backend.xp.zeros_like(u)
+        d_w_w: "backend.xp.ndarray" = backend.xp.zeros_like(u)
 
         # Initial cost (Bug-fix #4: compute once, not twice)
         prev_cost = self._compute_cost(w_h, w_w, Hx_k, lambda_tv, _tvnorm)
@@ -459,14 +501,16 @@ class TVAL3Deconv(DeconvBase):
             #   ⟨−Gx, p⟩ = ⟨x, backward_div_periodic(p)⟩)
             # rhs = ρ_v H^T(v−d_v) − ρ_w backward_div_periodic(w−d_w)
             rhs = (
-                rho_v * xp.real(ifft2(self.H_conj_full * fft2(v - d_v)))
+                rho_v * backend.xp.real(
+                    backend.ifft2(self.H_conj_full * backend.fft2(v - d_v))
+                )
                 - rho_w * backward_div_periodic(w_h - d_w_h, w_w - d_w_w)
             )
             denom = rho_v * self.H_H_conj + rho_w * self.lap_fft
-            u = xp.real(ifft2(fft2(rhs) / (denom + eps)))
+            u = backend.xp.real(backend.ifft2(backend.fft2(rhs) / (denom + eps)))
 
             # ── Step 3: NaN/Inf check (Bug-fix #5: before cost/projection) ─
-            if not bool(xp.isfinite(u).all()):
+            if not bool(backend.xp.isfinite(u).all()):
                 logger.warning(
                     "NaN/Inf in u at iteration %d; stopping early.", k
                 )
@@ -477,10 +521,10 @@ class TVAL3Deconv(DeconvBase):
 
             # Positivity projection
             if _nonneg:
-                u = xp.maximum(u, eps_pos)
+                u = backend.xp.maximum(u, eps_pos)
 
             # ── Step 4: Recompute Hx and gradients for next iteration ──────
-            Hx_k = xp.real(ifft2(self.H_full * fft2(u)))
+            Hx_k = backend.xp.real(backend.ifft2(self.H_full * backend.fft2(u)))
             dx, dy = forward_grad_periodic(u)
 
             # ── Step 5: w-update (vectorial shrinkage) ─────────────────────
@@ -547,20 +591,26 @@ class TVAL3Deconv(DeconvBase):
                     break
 
             # ── Step 8: Adaptive ρ_v (Boyd et al. 2011 §3.4.1) ────────────
-            r_pv = float(xp.linalg.norm(Hx_k - v))
-            r_dv = rho_v * float(xp.linalg.norm(v - v_old))
+            r_pv = float(backend.xp.linalg.norm(Hx_k - v))
+            r_dv = rho_v * float(backend.xp.linalg.norm(v - v_old))
             ratio = r_pv / (r_dv + eps)
+            rho_v_old = rho_v
+            rho_v_new = rho_v
             if ratio > 10.0:
-                rho_v = min(rho_v * self.mu_factor, self.mu_max)
+                rho_v_new = min(rho_v * self.mu_factor, self.mu_max)
             elif ratio < 0.1:
-                rho_v = max(rho_v / self.mu_factor, self.mu_min)
+                rho_v_new = max(rho_v / self.mu_factor, self.mu_min)
+
+            if rho_v_new != rho_v_old:
+                d_v *= (rho_v_old / rho_v_new)
+                rho_v = rho_v_new
 
         else:
             self._log_no_convergence(num_iter, tol)
 
         self._last_mu = rho_v
         del d_v, d_w_h, d_w_w, v, w_h, w_w, dx, dy, Hx_k, rhs, denom
-        return self._crop_and_return(u.astype(xp.float32))
+        return self._crop_and_return(u.astype(backend.xp.float32))
 
     # ══════════════════════════════════════════════════════════════════════
     # Properties

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._backend import xp, _to_numpy
+from . import _backend as backend
 
 # ── Optional BM3D dependency ───────────────────────────────────────────────
 try:
@@ -35,11 +35,11 @@ except ImportError:
 
 
 def bm3d_denoise(
-    image: "xp.ndarray",
+    image: "backend.xp.ndarray",
     sigma: float,
     profile: str = "np",
     range_mode: str = "affine",
-) -> "xp.ndarray":
+) -> "backend.xp.ndarray":
     """
     Apply BM3D denoising with automatic GPU↔CPU transfer.
 
@@ -53,7 +53,7 @@ def bm3d_denoise(
 
     Parameters
     ----------
-    image : xp.ndarray
+    image : backend.xp.ndarray
         Image to denoise.  Can be GPU or CPU, any floating dtype.
         Expected to be normalized to [0, 1].
     sigma : float
@@ -73,7 +73,7 @@ def bm3d_denoise(
 
     Returns
     -------
-    xp.ndarray
+    backend.xp.ndarray
         Denoised image, same dtype and shape as ``image``.
 
     Raises
@@ -96,7 +96,7 @@ def bm3d_denoise(
         raise ValueError("range_mode must be 'affine' or 'none'")
 
     # GPU → CPU (no-op on CPU)
-    image_np = _to_numpy(image).astype(np.float64)
+    image_np = backend._to_numpy(image).astype(np.float64)
 
     if range_mode == "none":
         den_input = image_np
@@ -120,10 +120,15 @@ def bm3d_denoise(
             den_input = (image_np - offset) / scale
             sigma_eff = float(sigma) / scale
 
-    denoised_np = _bm3d_func(image_np, sigma_psd=sigma, profile=profile)
-    
-    if range_mode == "affine" and not (offset == 0.0 and scale == 1.0):
-        denoised_np = offset + scale * denoised_np    
+    denoised_np = _bm3d_func(den_input, sigma_psd=sigma_eff, profile=profile)
+
+    if range_mode == "affine":
+        # BM3D expects images in [0, 1]; clip small overshoots before optionally
+        # mapping the denoised result back to the original data range.
+        denoised_np = np.clip(denoised_np, 0.0, 1.0)
+
+        if not (offset == 0.0 and scale == 1.0):
+            denoised_np = offset + scale * denoised_np
 
     # CPU → GPU (no-op on CPU); match input dtype
-    return xp.array(denoised_np, dtype=image.dtype)
+    return backend.xp.array(denoised_np, dtype=image.dtype)

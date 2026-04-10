@@ -90,7 +90,7 @@ from typing import Optional
 
 import numpy as np
 
-from ._backend import xp
+from . import _backend as backend
 from ._denoise_utils import _HAS_BM3D, bm3d_denoise
 from .admm import ADMMDeconv
 
@@ -218,7 +218,7 @@ class PnPADMM(ADMMDeconv):
     # Prior interface overrides
     # ══════════════════════════════════════════════════════════════════════
 
-    def _prior_init(self, u: xp.ndarray) -> dict:
+    def _prior_init(self, u: backend.xp.ndarray) -> dict:
         """
         Initialise PnP split variables.
 
@@ -227,7 +227,7 @@ class PnPADMM(ADMMDeconv):
 
         Parameters
         ----------
-        u : xp.ndarray
+        u : backend.xp.ndarray
             Initial image estimate on the canvas, float64.
 
         Returns
@@ -237,17 +237,17 @@ class PnPADMM(ADMMDeconv):
         """
         return {
             "z": u.copy(),
-            "d_z": xp.zeros_like(u),
+            "d_z": backend.xp.zeros_like(u),
         }
 
     def _prior_update(
         self,
-        u: xp.ndarray,
+        u: backend.xp.ndarray,
         state: dict,
         lambda_tv: float,
         rho_w: float,
         eps: float,
-    ) -> xp.ndarray:
+    ) -> backend.xp.ndarray:
         """
         Apply BM3D denoiser to (x_old + d_z) in place of TV shrinkage.
 
@@ -264,7 +264,7 @@ class PnPADMM(ADMMDeconv):
 
         Parameters
         ----------
-        u : xp.ndarray
+        u : backend.xp.ndarray
             Current (OLD) image estimate, float64.
         state : dict
             Mutable state dict from _prior_init (keys: z, d_z).
@@ -278,14 +278,14 @@ class PnPADMM(ADMMDeconv):
 
         Returns
         -------
-        xp.ndarray
+        backend.xp.ndarray
             prior_rhs = ρ_z · (z − d_z), the spatial-domain contribution
             to the x-update RHS.  The parent assembles:
                 rhs = ρ_v H^T(v − d_v) + prior_rhs
             then solves  x = Re[ℱ⁻¹(ℱ(rhs) / (denom + ε))].
         """
         rho_z = rho_w  # rename for clarity within this method
-        sigma = self.sigma_scale * float(xp.sqrt(lambda_tv / (rho_z + eps)))
+        sigma = self.sigma_scale * float(backend.xp.sqrt(lambda_tv / (rho_z + eps)))
         sigma = max(sigma, 1e-6)  # floor: prevent BM3D no-op / instability
 
         # Save previous z for convergence diagnostics
@@ -299,7 +299,7 @@ class PnPADMM(ADMMDeconv):
         # Spatial-domain prior RHS: ρ_z (z − d_z)
         return rho_z * (state["z"] - state["d_z"])
 
-    def _prior_dual_update(self, u: xp.ndarray, state: dict) -> None:
+    def _prior_dual_update(self, u: backend.xp.ndarray, state: dict) -> None:
         """
         Update the z dual variable after the x-update.
 
@@ -307,14 +307,14 @@ class PnPADMM(ADMMDeconv):
 
         Parameters
         ----------
-        u : xp.ndarray
+        u : backend.xp.ndarray
             New image estimate (after x-update + positivity), float64.
         state : dict
             Mutable state dict (keys: z, d_z).
         """
         state["d_z"] += u - state["z"]
 
-    def _x_update_denom(self, rho_v: float, rho_w: float) -> xp.ndarray:
+    def _x_update_denom(self, rho_v: float, rho_w: float) -> backend.xp.ndarray:
         """
         Denominator for the FFT x-update solve.
 
@@ -336,7 +336,7 @@ class PnPADMM(ADMMDeconv):
 
         Returns
         -------
-        xp.ndarray, shape self.full_shape, dtype float64
+        backend.xp.ndarray, shape self.full_shape, dtype float64
         """
         return rho_v * self.H_H_conj + rho_w  # scalar broadcast
 
@@ -344,7 +344,7 @@ class PnPADMM(ADMMDeconv):
     # BM3D wrapper
     # ══════════════════════════════════════════════════════════════════════
 
-    def _denoise(self, image: xp.ndarray, sigma: float) -> xp.ndarray:
+    def _denoise(self, image: backend.xp.ndarray, sigma: float) -> backend.xp.ndarray:
         """
         Apply BM3D to an image with automatic GPU↔CPU transfer.
 
@@ -359,7 +359,7 @@ class PnPADMM(ADMMDeconv):
 
         Parameters
         ----------
-        image : xp.ndarray
+        image : backend.xp.ndarray
             Noisy image on either CPU or GPU, any floating dtype.
         sigma : float
             BM3D noise standard deviation (same scale as image values,
@@ -367,14 +367,14 @@ class PnPADMM(ADMMDeconv):
 
         Returns
         -------
-        xp.ndarray
+        backend.xp.ndarray
             Denoised image, same dtype and shape as input.
         """
         return bm3d_denoise(image, sigma, self.denoiser_profile)
 
     def _check_prior_convergence(
         self,
-        u: xp.ndarray,
+        u: backend.xp.ndarray,
         state: dict,
         rho_w: float,
         tol: float,
@@ -388,10 +388,10 @@ class PnPADMM(ADMMDeconv):
         z = state["z"]
         z_old = state.get("z_old", z)
 
-        r_pz = float(xp.linalg.norm(u - z))
-        r_dz = rho_z * float(xp.linalg.norm(z - z_old))
+        r_pz = float(backend.xp.linalg.norm(u - z))
+        r_dz = rho_z * float(backend.xp.linalg.norm(z - z_old))
 
-        scale = float(xp.linalg.norm(u)) + 1e-8
+        scale = float(backend.xp.linalg.norm(u)) + 1e-8
         rel = max(r_pz, r_dz) / scale
         ok = rel < tol
 

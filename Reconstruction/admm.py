@@ -79,13 +79,7 @@ from typing import Optional
 
 import numpy as np
 
-from ._backend import (
-    xp,
-    fft2, ifft2, fftfreq,
-    rfft2, irfft2,
-    ifftshift,
-    _freeze, _to_numpy,
-)
+from . import _backend as backend
 from ._base import DeconvBase
 from ._tv_operators import forward_grad_periodic, backward_div_periodic
 
@@ -160,18 +154,39 @@ class ADMMDeconv(DeconvBase):
     ) -> None:
         super().__init__(image, psf, **kwargs)
 
+        if rho_v <= 0.0:
+            raise ValueError(f"rho_v must be positive, got {rho_v!r}")
+        if rho_w <= 0.0:
+            raise ValueError(f"rho_w must be positive, got {rho_w!r}")
+        if rho_max <= 0.0:
+            raise ValueError(f"rho_max must be positive, got {rho_max!r}")
+        if rho_min <= 0.0:
+            raise ValueError(f"rho_min must be positive, got {rho_min!r}")
+        if rho_min > rho_max:
+            raise ValueError(
+                f"rho_min must be <= rho_max, got rho_min={rho_min!r}, "
+                f"rho_max={rho_max!r}"
+            )
+        if rho_factor <= 0.0:
+            raise ValueError(f"rho_factor must be positive, got {rho_factor!r}")
+        if TVnorm not in (1, 2):
+            raise ValueError(
+                f"TVnorm must be 1 or 2, got {TVnorm!r}. "
+                "Use 2 for isotropic TV or 1 for anisotropic TV."
+            )
+
         # ── Full complex PSF spectrum in float64 ───────────────────────────
         # Recover the spatial PSF from the base-class rfft2 precomputation,
         # cast to float64, then compute full M×N complex FFT.
-        psf_spatial: xp.ndarray = irfft2(
+        psf_spatial: "backend.xp.ndarray" = backend.irfft2(
             self.PF, s=self.full_shape
-        ).astype(xp.float64)
+        ).astype(backend.xp.float64)
 
-        H_full = fft2(psf_spatial)
-        self.H_full: xp.ndarray = _freeze(H_full)
-        self.H_conj_full: xp.ndarray = _freeze(H_full.conj().copy())
-        self.H_H_conj: xp.ndarray = _freeze(
-            xp.real(self.H_conj_full * self.H_full).copy()
+        H_full = backend.fft2(psf_spatial)
+        self.H_full: "backend.xp.ndarray" = backend._freeze(H_full)
+        self.H_conj_full: "backend.xp.ndarray" = backend._freeze(H_full.conj().copy())
+        self.H_H_conj: "backend.xp.ndarray" = backend._freeze(
+            backend.xp.real(self.H_conj_full * self.H_full).copy()
         )
 
         # ── Laplacian eigenvalue tensor (periodic BC) ──────────────────────
@@ -179,11 +194,11 @@ class ADMMDeconv(DeconvBase):
         # Eigenvalues of G^TG for forward-difference gradient G under
         # periodic BC.  Required for the exact FFT x-solve.
         M_f, N_f = self.full_shape
-        fy = fftfreq(M_f).reshape(-1, 1).astype(xp.float64)
-        fx = fftfreq(N_f).reshape(1, -1).astype(xp.float64)
-        self.lap_fft: xp.ndarray = _freeze(
-            (4.0 - 2.0 * xp.cos(2.0 * xp.pi * fy)
-             - 2.0 * xp.cos(2.0 * xp.pi * fx)).copy()
+        fy = backend.fftfreq(M_f).reshape(-1, 1).astype(backend.xp.float64)
+        fx = backend.fftfreq(N_f).reshape(1, -1).astype(backend.xp.float64)
+        self.lap_fft: "backend.xp.ndarray" = backend._freeze(
+            (4.0 - 2.0 * backend.xp.cos(2.0 * backend.xp.pi * fy)
+             - 2.0 * backend.xp.cos(2.0 * backend.xp.pi * fx)).copy()
         )
 
         logger.debug(
@@ -232,8 +247,8 @@ class ADMMDeconv(DeconvBase):
         return {
             "w_h": dx.copy(),
             "w_w": dy.copy(),
-            "d_w_h": xp.zeros_like(u),
-            "d_w_w": xp.zeros_like(u),
+            "d_w_h": backend.xp.zeros_like(u),
+            "d_w_w": backend.xp.zeros_like(u),
         }
 
     def _prior_update(
@@ -363,12 +378,12 @@ class ADMMDeconv(DeconvBase):
         """
         if tvnorm == 1:
             return (
-                xp.sign(x) * xp.maximum(xp.abs(x) - thresh, 0.0),
-                xp.sign(y) * xp.maximum(xp.abs(y) - thresh, 0.0),
+                backend.xp.sign(x) * backend.xp.maximum(backend.xp.abs(x) - thresh, 0.0),
+                backend.xp.sign(y) * backend.xp.maximum(backend.xp.abs(y) - thresh, 0.0),
             )
         else:
-            mag = xp.sqrt(x * x + y * y)
-            scale = xp.maximum(mag - thresh, 0.0) / (mag + eps)
+            mag = backend.xp.sqrt(x * x + y * y)
+            scale = backend.xp.maximum(mag - thresh, 0.0) / (mag + eps)
             return scale * x, scale * y
 
     def _compute_admm_cost(
@@ -399,18 +414,21 @@ class ADMMDeconv(DeconvBase):
         -------
         float
         """
-        mask_f64 = self.mask.astype(xp.float64)
-        y_f64 = self.image.astype(xp.float64)
-        data_term = 0.5 * float(xp.sum((mask_f64 * (Hx - y_f64)) ** 2))
+        mask_f64 = self.mask.astype(backend.xp.float64)
+        y_f64 = self.image.astype(backend.xp.float64)
+        data_term = 0.5 * float(backend.xp.sum((mask_f64 * (Hx - y_f64)) ** 2))
 
         w_h = state.get("w_h")
         w_w = state.get("w_w")
         if w_h is not None and w_w is not None:
             if tvnorm == 1:
-                tv_term = float(xp.sum(xp.abs(w_h)) + xp.sum(xp.abs(w_w)))
+                tv_term = float(
+                    backend.xp.sum(backend.xp.abs(w_h))
+                    + backend.xp.sum(backend.xp.abs(w_w))
+                )
             else:
                 tv_term = float(
-                    xp.sum(xp.sqrt(w_h * w_h + w_w * w_w + 1e-12))
+                    backend.xp.sum(backend.xp.sqrt(w_h * w_h + w_w * w_w + 1e-12))
                 )
             return data_term + lambda_tv * tv_term
         return data_term
@@ -474,9 +492,9 @@ class ADMMDeconv(DeconvBase):
         r_dual : float
             ρ_v · ||v−v_old||  (v dual residual).
         """
-        r_v = float(xp.linalg.norm(Hx - v))
-        r_dv = rho_v * float(xp.linalg.norm(v - v_old))
-        scale = float(xp.linalg.norm(u)) + _EPSILON
+        r_v = float(backend.xp.linalg.norm(Hx - v))
+        r_dv = rho_v * float(backend.xp.linalg.norm(v - v_old))
+        scale = float(backend.xp.linalg.norm(u)) + _EPSILON
         rel_change = max(r_v, r_dv) / scale
         converged = rel_change < tol
         return converged, rel_change, r_v, r_dv
@@ -523,29 +541,47 @@ class ADMMDeconv(DeconvBase):
         np.ndarray, shape (self.h, self.w)
             Deconvolved image cropped to the original FOV, on CPU.
         """
+        if num_iter < 1:
+            raise ValueError(f"num_iter must be >= 1, got {num_iter!r}")
+        if lambda_tv < 0.0:
+            raise ValueError(f"lambda_tv must be >= 0, got {lambda_tv!r}")
+        if tol < 0.0:
+            raise ValueError(f"tol must be >= 0, got {tol!r}")
+        if min_iter < 0:
+            raise ValueError(f"min_iter must be >= 0, got {min_iter!r}")
+        if check_every < 1:
+            raise ValueError(f"check_every must be >= 1, got {check_every!r}")
+
         # ── Resolve per-call overrides ─────────────────────────────────────
         _nonneg = self.nonneg if nonneg is None else bool(nonneg)
         _tvnorm = self.TVnorm if TVnorm is None else int(TVnorm)
+        if _tvnorm not in (1, 2):
+            raise ValueError(
+                f"TVnorm must be 1 or 2, got {_tvnorm!r}. "
+                "Use 2 for isotropic TV or 1 for anisotropic TV."
+            )
 
         # ── Precision constants ────────────────────────────────────────────
         eps = _EPSILON
-        eps_pos = xp.float64(1e-8)
+        eps_pos = backend.xp.float64(1e-8)
 
         # ── Adaptive penalty state (rho_v adapts; rho_w is fixed) ─────────
         rho_v: float = self.rho_v
         rho_w: float = self.rho_w
 
         # ── Initialise state in float64 ────────────────────────────────────
-        u: xp.ndarray = self.estimated_image.astype(xp.float64).copy()
-        mask_f64: xp.ndarray = self.mask.astype(xp.float64)
-        y_f64: xp.ndarray = self.image.astype(xp.float64)
+        u: "backend.xp.ndarray" = self.estimated_image.astype(backend.xp.float64).copy()
+        mask_f64: "backend.xp.ndarray" = self.mask.astype(backend.xp.float64)
+        y_f64: "backend.xp.ndarray" = self.image.astype(backend.xp.float64)
 
         # Initial forward pass
-        Hx_k: xp.ndarray = xp.real(ifft2(self.H_full * fft2(u)))
+        Hx_k: "backend.xp.ndarray" = backend.xp.real(
+            backend.ifft2(self.H_full * backend.fft2(u))
+        )
 
         # Initialise v and d_v
-        v: xp.ndarray = Hx_k.copy()
-        d_v: xp.ndarray = xp.zeros_like(u)
+        v: "backend.xp.ndarray" = Hx_k.copy()
+        d_v: "backend.xp.ndarray" = backend.xp.zeros_like(u)
 
         # Initialise prior state via overridable method
         state: dict = self._prior_init(u)
@@ -572,21 +608,23 @@ class ADMMDeconv(DeconvBase):
 
             # ── Step 2: Prior update (uses OLD u) ──────────────────────────
             # Overridable: updates state (w, etc.) and returns prior_rhs.
-            prior_rhs: xp.ndarray = self._prior_update(
+            prior_rhs: "backend.xp.ndarray" = self._prior_update(
                 u, state, lambda_tv, rho_w, _EPS_GRAD
             )
 
             # ── Step 3: x-update (exact FFT solve) ─────────────────────────
             # rhs = ρ_v H^T(v − d_v) + prior_rhs
             rhs = (
-                rho_v * xp.real(ifft2(self.H_conj_full * fft2(v - d_v)))
+                rho_v * backend.xp.real(
+                    backend.ifft2(self.H_conj_full * backend.fft2(v - d_v))
+                )
                 + prior_rhs
             )
             denom = self._x_update_denom(rho_v, rho_w)
-            u = xp.real(ifft2(fft2(rhs) / (denom + eps)))
+            u = backend.xp.real(backend.ifft2(backend.fft2(rhs) / (denom + eps)))
 
             # ── Step 4: NaN/Inf guard ──────────────────────────────────────
-            if not bool(xp.isfinite(u).all()):
+            if not bool(backend.xp.isfinite(u).all()):
                 logger.warning(
                     "NaN/Inf in u at iteration %d; stopping early.", k
                 )
@@ -597,10 +635,10 @@ class ADMMDeconv(DeconvBase):
 
             # Positivity projection
             if _nonneg:
-                u = xp.maximum(u, eps_pos)
+                u = backend.xp.maximum(u, eps_pos)
 
             # ── Step 5: Recompute Hx with new u ───────────────────────────
-            Hx_k = xp.real(ifft2(self.H_full * fft2(u)))
+            Hx_k = backend.xp.real(backend.ifft2(self.H_full * backend.fft2(u)))
 
             # ── Step 6: Dual v-update ──────────────────────────────────────
             d_v += Hx_k - v
@@ -667,8 +705,8 @@ class ADMMDeconv(DeconvBase):
                     break
 
             # ── Step 10: Adaptive ρ_v (Boyd §3.4.1) ─────────────────────────────
-            r_pv = float(xp.linalg.norm(Hx_k - v))
-            r_dv = rho_v * float(xp.linalg.norm(v - v_old))
+            r_pv = float(backend.xp.linalg.norm(Hx_k - v))
+            r_dv = rho_v * float(backend.xp.linalg.norm(v - v_old))
             ratio = r_pv / (r_dv + eps)
 
             rho_v_old = rho_v
@@ -690,7 +728,7 @@ class ADMMDeconv(DeconvBase):
         self._last_rho_v = rho_v
         self._last_rho_w = rho_w
         del d_v, v, Hx_k, rhs, denom, prior_rhs
-        return self._crop_and_return(u.astype(xp.float32))
+        return self._crop_and_return(u.astype(backend.xp.float32))
 
     # ══════════════════════════════════════════════════════════════════════
     # Properties

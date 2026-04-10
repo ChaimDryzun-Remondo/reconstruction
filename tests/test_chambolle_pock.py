@@ -515,6 +515,33 @@ class TestConvergence:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 12b. Validation / edge cases
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestValidation:
+
+    def test_num_iter_zero_raises_value_error(self, blurred, small_psf):
+        solver = ChambollePockDeconv(blurred, small_psf)
+        with pytest.raises(ValueError, match="num_iter"):
+            solver.deblur(num_iter=0, lambda_tv=0.01)
+
+    def test_lambda_tv_zero_runs_without_nan(self, blurred, small_psf):
+        result = ChambollePockDeconv(blurred, small_psf).deblur(
+            num_iter=5, lambda_tv=0.0
+        )
+        assert isinstance(result, np.ndarray)
+        assert np.isfinite(result).all()
+
+    def test_theta_out_of_range_raises(self, blurred, small_psf):
+        with pytest.raises(ValueError, match="theta"):
+            ChambollePockDeconv(blurred, small_psf, theta=1.5)
+
+    def test_sigma_dual_nonpositive_raises(self, blurred, small_psf):
+        with pytest.raises(ValueError, match="sigma_dual"):
+            ChambollePockDeconv(blurred, small_psf, sigma_dual=0.0)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 13. Wrapper chambolle_pock_deblur
 # ══════════════════════════════════════════════════════════════════════════════
 

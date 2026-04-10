@@ -21,14 +21,14 @@ from typing import Optional
 
 import numpy as np
 
-from ._backend import (
-    xp, rfft2, irfft2, ifftshift, _freeze, _to_numpy, _use_gpu, PaddingStr,
-)
-from RemondoPythonCore.Common.General_Utilities import (
-    padding, cropping, odd_crop_around_center,
-)
-from RemondoPythonCore.Common.PSF_Preprocessing import psf_preprocess, condition_psf
-from RemondoPythonCore.Common.Image_Preprocessing import (
+from . import _backend as backend
+from ._backend import PaddingStr
+from ._common import (
+    padding,
+    cropping,
+    odd_crop_around_center,
+    psf_preprocess,
+    condition_psf,
     image_normalization, validate_image, to_grayscale,
 )
 
@@ -177,22 +177,22 @@ class DeconvBase(ABC):
         # ── Step 7: GPU warm-up ────────────────────────────────────────────
         # Pre-trigger JIT compilation and FFT plan caching on the first
         # allocation so that subsequent transforms start without latency.
-        if _use_gpu:
-            _dummy = xp.zeros(self.full_shape, dtype=xp.float32)
-            _ = rfft2(_dummy)
+        if backend._use_gpu:
+            _dummy = backend.xp.zeros(self.full_shape, dtype=backend.xp.float32)
+            _ = backend.rfft2(_dummy)
             del _dummy
 
         # ── Step 8: Pad observed image onto the canvas ────────────────────
         # Taper is allowed but MUST be padding-band-only with interior
         # weight = 1 so the observed data inside Ω is not modified.
-        self.image: xp.ndarray = xp.array(
+        self.image: "backend.xp.ndarray" = backend.xp.array(
             padding(
                 image=gray,
                 full_size=self.full_shape,
                 Type=paddingMode,
                 apply_taper=bool(apply_taper_on_padding_band),
             ),
-            dtype=xp.float32,
+            dtype=backend.xp.float32,
         )
 
         # ── Step 9: Build mask M ──────────────────────────────────────────
@@ -206,12 +206,14 @@ class DeconvBase(ABC):
         # implementation matches this assumption.
         self.use_mask: bool = use_mask
         if use_mask:
-            self.mask: xp.ndarray = xp.zeros(self.full_shape, dtype=xp.float32)
+            self.mask: "backend.xp.ndarray" = backend.xp.zeros(
+                self.full_shape, dtype=backend.xp.float32
+            )
             off_y = (self.full_shape[0] - self.h) // 2
             off_x = (self.full_shape[1] - self.w) // 2
             self.mask[off_y:off_y + self.h, off_x:off_x + self.w] = 1.0
         else:
-            self.mask = xp.ones(self.full_shape, dtype=xp.float32)
+            self.mask = backend.xp.ones(self.full_shape, dtype=backend.xp.float32)
 
         # ── Step 10: PSF frequency-domain preparation ─────────────────────
 
@@ -237,26 +239,26 @@ class DeconvBase(ABC):
         #    IMPORTANT: no edge extension and no taper on the PSF.  The PSF
         #    must satisfy Σh = 1 (energy conservation); any non-zero padding
         #    or tapering would violate photometric consistency.
-        psf_pad: xp.ndarray = xp.array(
+        psf_pad: "backend.xp.ndarray" = backend.xp.array(
             padding(
                 image=psf_np,
                 full_size=self.full_shape,
                 Type="Zero",
                 apply_taper=False,
             ),
-            dtype=xp.float32,
+            dtype=backend.xp.float32,
         )
 
         # d) ifftshift: move the PSF centre from the array centre to [0, 0].
         #    This makes FFT-based convolution equivalent to centred linear
         #    convolution without introducing a phase ramp.
-        psf_pad = ifftshift(psf_pad)
+        psf_pad = backend.ifftshift(psf_pad)
 
         # e) Compute and freeze the PSF spectrum and its conjugate.
         #    H(f)  = FFT(h)       — forward model in the frequency domain
         #    H*(f) = conj(H(f))   — correlation (adjoint) operator
-        self.PF: xp.ndarray = _freeze(rfft2(psf_pad))
-        self.conjPF: xp.ndarray = _freeze(self.PF.conj())
+        self.PF: "backend.xp.ndarray" = backend._freeze(backend.rfft2(psf_pad))
+        self.conjPF: "backend.xp.ndarray" = backend._freeze(self.PF.conj())
 
         # ── Step 11: Precompute H^T M with relative floor clamp ───────────
         # H^T M = irfft2(H*(f) · F[M]) measures, at each pixel, how much
@@ -267,14 +269,14 @@ class DeconvBase(ABC):
         # Relative floor:  floor = max(htm_floor_frac × max(H^T M), 1e-12)
         # Typical htm_floor_frac = 0.05 (5 % of the peak).
         fshape = self.full_shape
-        htm_raw = irfft2(
-            self.conjPF * rfft2(self.mask), s=fshape
-        ).astype(xp.float32)
+        htm_raw = backend.irfft2(
+            self.conjPF * backend.rfft2(self.mask), s=fshape
+        ).astype(backend.xp.float32)
 
-        htm_max = float(xp.max(htm_raw))
+        htm_max = float(backend.xp.max(htm_raw))
         htm_floor = max(htm_floor_frac * htm_max, 1e-12)
-        xp.clip(htm_raw, a_min=htm_floor, a_max=None, out=htm_raw)
-        self.HTM: xp.ndarray = _freeze(htm_raw)
+        backend.xp.clip(htm_raw, a_min=htm_floor, a_max=None, out=htm_raw)
+        self.HTM: "backend.xp.ndarray" = backend._freeze(htm_raw)
 
         logger.debug(
             "HTM: max=%.4f, floor=%.4f (%.1f%% of max)",
@@ -284,23 +286,27 @@ class DeconvBase(ABC):
         # ── Step 12: Lipschitz constant L = max |H(f)|² ───────────────────
         # L = ||H^T H||_op = max_f |H(f)|².
         # Used by Landweber-type algorithms to set a stable step size.
-        self._lipschitz: float = float(xp.max(xp.abs(self.PF) ** 2))
+        self._lipschitz: float = float(backend.xp.max(backend.xp.abs(self.PF) ** 2))
         logger.debug("Lipschitz constant L = %.6f", self._lipschitz)
 
         # ── Step 13: Initial estimate on the padded canvas ────────────────
         init_source = initialEstimate if initialEstimate is not None else gray
-        self.estimated_image: xp.ndarray = xp.array(
+        self.estimated_image: "backend.xp.ndarray" = backend.xp.array(
             padding(
                 image=init_source,
                 full_size=self.full_shape,
                 Type=paddingMode,
                 apply_taper=bool(apply_taper_on_padding_band),
             ),
-            dtype=xp.float32,
+            dtype=backend.xp.float32,
         )
         # Ensure strictly positive start (required for RL; beneficial for
         # Landweber when combined with a positivity projection).
-        xp.maximum(self.estimated_image, xp.float32(1e-8), out=self.estimated_image)
+        backend.xp.maximum(
+            self.estimated_image,
+            backend.xp.float32(1e-8),
+            out=self.estimated_image,
+        )
 
     # ══════════════════════════════════════════════════════════════════════
     # Abstract interface
@@ -344,7 +350,7 @@ class DeconvBase(ABC):
             Deconvolved image cropped to the original field of view.
         """
         self.estimated_image = x_k.copy()
-        return _to_numpy(cropping(x_k, (self.h, self.w)))
+        return backend._to_numpy(cropping(x_k, (self.h, self.w)))
 
     def _check_convergence(
         self,
@@ -386,9 +392,9 @@ class DeconvBase(ABC):
         converged : bool
             ``True`` if ``rel_change < tol``.
         """
-        den = xp.linalg.norm(x_new)
-        den = den if float(den) > 0.0 else xp.float32(eps)
-        rel_chg = float(xp.linalg.norm(x_new - x_old) / den)
+        den = backend.xp.linalg.norm(x_new)
+        den = den if float(den) > 0.0 else backend.xp.float32(eps)
+        rel_chg = float(backend.xp.linalg.norm(x_new - x_old) / den)
         converged = rel_chg < tol
         if converged:
             logger.info(

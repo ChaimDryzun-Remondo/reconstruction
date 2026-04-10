@@ -101,7 +101,7 @@ from typing import Optional
 
 import numpy as np
 
-from ._backend import xp
+from . import _backend as backend
 from ._denoise_utils import _HAS_BM3D, bm3d_denoise
 from .admm import ADMMDeconv
 
@@ -285,7 +285,7 @@ class REDDeconv(ADMMDeconv):
     # Prior interface overrides
     # ══════════════════════════════════════════════════════════════════════
 
-    def _prior_init(self, u: "xp.ndarray") -> dict:
+    def _prior_init(self, u: "backend.xp.ndarray") -> dict:
         """
         Initialise RED prior state.
 
@@ -294,7 +294,7 @@ class REDDeconv(ADMMDeconv):
 
         Parameters
         ----------
-        u : xp.ndarray
+        u : backend.xp.ndarray
             Initial image estimate, float64.
 
         Returns
@@ -306,12 +306,12 @@ class REDDeconv(ADMMDeconv):
 
     def _prior_update(
         self,
-        u: "xp.ndarray",
+        u: "backend.xp.ndarray",
         state: dict,
         lambda_tv: float,
         rho_w: float,
         eps: float,
-    ) -> "xp.ndarray":
+    ) -> "backend.xp.ndarray":
         """
         Compute the RED prior contribution to the x-update RHS.
 
@@ -335,7 +335,7 @@ class REDDeconv(ADMMDeconv):
 
         Parameters
         ----------
-        u : xp.ndarray
+        u : backend.xp.ndarray
             Current (OLD) image estimate, float64.
         state : dict
             Mutable state dict from _prior_init (key: ``"denoised"``).
@@ -349,7 +349,7 @@ class REDDeconv(ADMMDeconv):
 
         Returns
         -------
-        xp.ndarray
+        backend.xp.ndarray
             prior_rhs = λ · D_σ(u), spatial domain, same shape as u.
         """
         denoised = self._denoise(u, self._sigma)
@@ -357,7 +357,7 @@ class REDDeconv(ADMMDeconv):
         logger.debug("RED prior_update: sigma=%.4f", self._sigma)
         return lambda_tv * denoised
 
-    def _prior_dual_update(self, u: "xp.ndarray", state: dict) -> None:
+    def _prior_dual_update(self, u: "backend.xp.ndarray", state: dict) -> None:
         """
         No-op: RED-ADMM has no prior dual variable.
 
@@ -367,13 +367,13 @@ class REDDeconv(ADMMDeconv):
 
         Parameters
         ----------
-        u : xp.ndarray
+        u : backend.xp.ndarray
             New image estimate (unused).
         state : dict
             Prior state dict (unchanged by this method).
         """
 
-    def _x_update_denom(self, rho_v: float, rho_w: float) -> "xp.ndarray":
+    def _x_update_denom(self, rho_v: float, rho_w: float) -> "backend.xp.ndarray":
         """
         Denominator array for the FFT x-update solve.
 
@@ -395,7 +395,7 @@ class REDDeconv(ADMMDeconv):
 
         Returns
         -------
-        xp.ndarray, shape self.full_shape, dtype float64
+        backend.xp.ndarray, shape self.full_shape, dtype float64
         """
         return rho_v * self.H_H_conj + self._current_lambda
 
@@ -403,7 +403,7 @@ class REDDeconv(ADMMDeconv):
     # BM3D wrapper
     # ══════════════════════════════════════════════════════════════════════
 
-    def _denoise(self, image: "xp.ndarray", sigma: float) -> "xp.ndarray":
+    def _denoise(self, image: "backend.xp.ndarray", sigma: float) -> "backend.xp.ndarray":
         """
         Apply BM3D denoising with automatic GPU↔CPU transfer.
 
@@ -411,14 +411,14 @@ class REDDeconv(ADMMDeconv):
 
         Parameters
         ----------
-        image : xp.ndarray
+        image : backend.xp.ndarray
             Image to denoise (float64, values expected in [0, 1]).
         sigma : float
             BM3D noise standard deviation.
 
         Returns
         -------
-        xp.ndarray
+        backend.xp.ndarray
             Denoised image, same dtype and shape as input.
         """
         return bm3d_denoise(image, sigma, self.denoiser_profile)

@@ -13,12 +13,64 @@ Checks:
 """
 from __future__ import annotations
 
+import sys
+import types
 import typing
 
 import numpy as np
 import pytest
 
 import Reconstruction._backend as backend
+
+
+def _make_fake_cupy_module() -> types.ModuleType:
+    """Create a tiny NumPy-backed CuPy stand-in for backend-switch tests."""
+    cp = types.ModuleType("cupy")
+    counts: dict[str, int] = {}
+
+    def wrap(name, func):
+        def _wrapped(*args, **kwargs):
+            counts[name] = counts.get(name, 0) + 1
+            return func(*args, **kwargs)
+        return _wrapped
+
+    cp.array = wrap("array", np.array)
+    cp.asarray = wrap("asarray", np.asarray)
+    cp.zeros = wrap("zeros", np.zeros)
+    cp.ones = wrap("ones", np.ones)
+    cp.zeros_like = wrap("zeros_like", np.zeros_like)
+    cp.empty_like = wrap("empty_like", np.empty_like)
+    cp.maximum = wrap("maximum", np.maximum)
+    cp.clip = wrap("clip", np.clip)
+    cp.abs = np.abs
+    cp.max = np.max
+    cp.sqrt = np.sqrt
+    cp.sign = np.sign
+    cp.exp = np.exp
+    cp.log = np.log
+    cp.real = np.real
+    cp.isfinite = np.isfinite
+    cp.sum = np.sum
+    cp.median = np.median
+    cp.pi = np.pi
+    cp.float32 = np.float32
+    cp.float64 = np.float64
+    cp.linalg = types.SimpleNamespace(norm=np.linalg.norm)
+    cp.asnumpy = np.asarray
+    cp.cuda = types.SimpleNamespace(
+        runtime=types.SimpleNamespace(getDeviceCount=lambda: 1)
+    )
+    cp.fft = types.SimpleNamespace(
+        rfft2=wrap("rfft2", np.fft.rfft2),
+        irfft2=wrap("irfft2", np.fft.irfft2),
+        fft2=wrap("fft2", np.fft.fft2),
+        ifft2=wrap("ifft2", np.fft.ifft2),
+        fftfreq=wrap("fftfreq", np.fft.fftfreq),
+        ifftshift=wrap("ifftshift", np.fft.ifftshift),
+        config=types.SimpleNamespace(set_plan_cache_size=lambda size: None),
+    )
+    cp._counts = counts
+    return cp
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -171,6 +223,33 @@ class TestSetBackend:
         arr = backend.xp.array(np.ones((3, 3), dtype=np.float32))
         result = backend._to_numpy(arr)
         assert isinstance(result, np.ndarray)
+
+    def test_set_backend_updates_subsequent_solver_backend_usage(
+        self,
+        monkeypatch,
+        test_image,
+        gaussian_psf,
+    ):
+        """Solvers imported on CPU must use the new backend after set_backend()."""
+        from Reconstruction import RLUnknownBoundary
+
+        fake_cupy = _make_fake_cupy_module()
+        monkeypatch.setattr(backend, "_detect_gpu", lambda: True)
+        monkeypatch.setitem(sys.modules, "cupy", fake_cupy)
+
+        backend.set_backend("gpu")
+
+        solver = RLUnknownBoundary(test_image, gaussian_psf)
+        solver.deblur(num_iter=1)
+
+        assert backend.xp is fake_cupy
+        assert fake_cupy._counts.get("array", 0) > 0, (
+            "Solver construction should allocate through the active backend "
+            "after set_backend('gpu')."
+        )
+        assert fake_cupy._counts.get("rfft2", 0) > 0, (
+            "Solver FFT work should route through the newly selected backend."
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
