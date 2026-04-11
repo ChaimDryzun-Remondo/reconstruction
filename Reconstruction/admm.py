@@ -214,7 +214,13 @@ class ADMMDeconv(DeconvBase):
 
         H_full = backend.fft2(psf_spatial)
         self.H_full: "backend.xp.ndarray" = backend._freeze(H_full)
-        self.H_conj_full: "backend.xp.ndarray" = backend._freeze(H_full.conj().copy())
+        # F8: ``H_full.conj()`` on a complex array already allocates a fresh
+        # buffer (verified: ``a.conj() is a`` is False and ``owndata`` is
+        # True), so the trailing ``.copy()`` here was redundant.  The
+        # ``.copy()`` below is kept: ``xp.real(complex_array)`` is a view
+        # with ``owndata=False``, and copying it releases the full complex
+        # intermediate instead of holding it alive as ``.base``.
+        self.H_conj_full: "backend.xp.ndarray" = backend._freeze(H_full.conj())
         self.H_H_conj: "backend.xp.ndarray" = backend._freeze(
             backend.xp.real(self.H_conj_full * self.H_full).copy()
         )

@@ -204,7 +204,11 @@ class TVAL3Deconv(DeconvBase):
 
         H_full = backend.fft2(psf_spatial)
         self.H_full: "backend.xp.ndarray" = backend._freeze(H_full)
-        self.H_conj_full: "backend.xp.ndarray" = backend._freeze(H_full.conj().copy())
+        # F8: ``H_full.conj()`` already allocates a fresh buffer on complex
+        # arrays; the trailing ``.copy()`` was redundant.  The ``.copy()``
+        # below stays — ``xp.real(complex_array)`` is a view, and copying
+        # it releases the full complex intermediate.
+        self.H_conj_full: "backend.xp.ndarray" = backend._freeze(H_full.conj())
         self.H_H_conj: "backend.xp.ndarray" = backend._freeze(
             backend.xp.real(self.H_conj_full * self.H_full).copy()
         )
