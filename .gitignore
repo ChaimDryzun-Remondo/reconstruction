@@ -33,3 +33,11 @@ Thumbs.db
 
 # CuPy cache
 .cupy/
+
+# Environment files (never commit secrets)
+.env
+.env.*
+*.env
+
+# Windows Zone.Identifier ADS sidecars
+*:Zone.Identifier
