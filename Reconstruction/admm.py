@@ -661,13 +661,11 @@ class ADMMDeconv(DeconvBase):
             prior_rhs: "backend.xp.ndarray" = self._prior_update(
                 u, state, lambda_tv, rho_w, _EPS_GRAD
             )
-            for key, value in state.items():
-                self._fail_on_nonfinite(
-                    backend.xp.asarray(value),
-                    name=f"ADMM prior state ({key})",
-                    iteration=k,
-                    last_finite=last_finite,
-                )
+            # F4: the prior_rhs check below is a strict superset of the
+            # state-dict sweep that used to sit here — prior_rhs is built
+            # from state entries by local/linear operations, so NaN anywhere
+            # in state propagates to prior_rhs.  Drop the per-key sweep (4
+            # full-canvas reductions per iteration on the default TV path).
             self._fail_on_nonfinite(
                 prior_rhs,
                 name="ADMM prior RHS",
