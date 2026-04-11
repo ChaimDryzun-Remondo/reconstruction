@@ -67,6 +67,13 @@ The effective BM3D noise level  σ = sigma_scale · √(λ / ρ_z).
 Typical well-conditioned range: σ ∈ [0.01, 0.1].
 If σ > 0.2 → over-smoothing; if σ < 0.005 → denoiser barely active.
 
+Statefulness
+------------
+``PnPADMM`` inherits ADMM's stateful warm-start behaviour. Repeated
+object-level ``deblur()`` calls start from the stored ``estimated_image``
+iterate, while the wrapper ``pnp_admm_deblur`` is a fresh cold start.
+Per-call diagnostics such as ``cost_history`` are replaced on each call.
+
 References
 ----------
 [1] S. V. Venkatakrishnan, C. A. Bouman, B. Wohlberg,
@@ -114,6 +121,10 @@ class PnPADMM(ADMMDeconv):
     prior.  This changes only the denominator (ρ_z scalar vs ρ_w · lap_fft)
     and the prior RHS term (ρ_z(z − d_z) vs −ρ_w div(w − d_w)).
     See the module docstring for the full derivation.
+
+    Repeated object-level :meth:`deblur` calls warm-start from the stored
+    ``estimated_image`` iterate by default. The convenience wrapper remains a
+    cold-start helper.
 
     **rho_z / rho_w mapping**: The parent class uses ``rho_w`` as the second
     penalty parameter.  PnPADMM maps ``rho_z → rho_w`` when calling
@@ -292,12 +303,24 @@ class PnPADMM(ADMMDeconv):
         state["z_old"] = state["z"].copy()
 
         denoiser_input = u + state["d_z"]
-        state["z"] = self._denoise(denoiser_input, sigma)
+        z_new = self._denoise(denoiser_input, sigma)
+        self._fail_on_nonfinite(
+            z_new,
+            name="PnP denoiser output",
+            last_finite=u,
+        )
+        state["z"] = z_new
         
         logger.debug("PnP z-update: sigma=%.4f", sigma)
 
         # Spatial-domain prior RHS: ρ_z (z − d_z)
-        return rho_z * (state["z"] - state["d_z"])
+        prior_rhs = rho_z * (state["z"] - state["d_z"])
+        self._fail_on_nonfinite(
+            prior_rhs,
+            name="PnP prior RHS",
+            last_finite=u,
+        )
+        return prior_rhs
 
     def _prior_dual_update(self, u: backend.xp.ndarray, state: dict) -> None:
         """

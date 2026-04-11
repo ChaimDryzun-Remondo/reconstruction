@@ -465,6 +465,79 @@ class TestDenoiserCallCount:
         )
 
 
+@pytest.mark.parametrize(
+    ("bad_value", "label"),
+    [
+        (np.nan, "NaN"),
+        (np.inf, "Inf"),
+    ],
+)
+class TestDenoiserNumericalFailureContract:
+
+    def test_nonfinite_denoiser_output_raises_immediately(
+        self, blurred, small_psf, monkeypatch, bad_value, label
+    ):
+        solver = REDDeconv(blurred, small_psf, sigma=0.05)
+        call_count = {"n": 0}
+
+        def _bad_denoise(image, sigma):
+            call_count["n"] += 1
+            return backend.xp.full_like(image, bad_value)
+
+        monkeypatch.setattr(solver, "_denoise", _bad_denoise)
+
+        with pytest.raises(FloatingPointError, match="denoiser output"):
+            solver.deblur(num_iter=5, lambda_reg=0.01, min_iter=999)
+
+        assert call_count["n"] == 1, (
+            f"RED should fail immediately on {label} denoiser output."
+        )
+
+    def test_failed_run_does_not_overwrite_estimated_image_with_nonfinite_values(
+        self, blurred, small_psf, monkeypatch, bad_value, label
+    ):
+        solver = REDDeconv(blurred, small_psf, sigma=0.05)
+        initial = np.array(solver.estimated_image, copy=True)
+
+        def _bad_denoise(image, sigma):
+            return backend.xp.full_like(image, bad_value)
+
+        monkeypatch.setattr(solver, "_denoise", _bad_denoise)
+
+        with pytest.raises(FloatingPointError, match="denoiser output"):
+            solver.deblur(num_iter=3, lambda_reg=0.01, min_iter=999)
+
+        final_state = np.array(solver.estimated_image)
+        assert np.isfinite(final_state).all(), (
+            f"Persistent state poisoned after {label} denoiser failure."
+        )
+        np.testing.assert_allclose(final_state, initial, atol=0.0, rtol=0.0)
+
+    def test_late_failure_may_preserve_last_finite_iterate_from_failed_call(
+        self, blurred, small_psf, monkeypatch, bad_value, label
+    ):
+        solver = REDDeconv(blurred, small_psf, sigma=0.05)
+        initial = np.array(solver.estimated_image, copy=True)
+        calls = {"count": 0}
+
+        def _staged_denoise(image, sigma):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return backend.xp.clip(image * 0.97 + 0.01, 0.0, 1.0)
+            return backend.xp.full_like(image, bad_value)
+
+        monkeypatch.setattr(solver, "_denoise", _staged_denoise)
+
+        with pytest.raises(FloatingPointError, match="denoiser output"):
+            solver.deblur(num_iter=2, lambda_reg=0.01, tol=0.0, min_iter=999)
+
+        final_state = np.array(solver.estimated_image)
+        assert np.isfinite(final_state).all(), (
+            f"Persistent state poisoned after staged {label} denoiser failure."
+        )
+        assert not np.allclose(final_state, initial)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 13. Fixed sigma
 # ══════════════════════════════════════════════════════════════════════════════
@@ -515,6 +588,22 @@ class TestCostHistory:
         solver.deblur(num_iter=5, lambda_reg=0.01)
         assert all(c >= 0.0 for c in solver.cost_history)
 
+    def test_cost_history_resets_between_deblur_calls(self, blurred, small_psf, monkeypatch):
+        """Each deblur() call should replace cost_history rather than append."""
+        def deterministic_denoise(image, sigma):
+            return backend.xp.clip(image * 0.97 + 0.01, 0.0, 1.0)
+
+        solver = REDDeconv(blurred, small_psf, sigma=0.05)
+        monkeypatch.setattr(solver, "_denoise", deterministic_denoise)
+        solver.deblur(num_iter=4, lambda_reg=0.01, tol=0.0, min_iter=999)
+        first_len = len(solver.cost_history)
+
+        solver.deblur(num_iter=1, lambda_reg=0.01, tol=0.0, min_iter=999)
+        second_len = len(solver.cost_history)
+
+        assert first_len == 5
+        assert second_len == 2
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 15. Wrapper red_deblur
@@ -559,6 +648,35 @@ class TestWrapper:
         import inspect
         params = list(inspect.signature(red_deblur).parameters.keys())
         assert params[1] == "psf"
+
+    def test_repeated_object_call_warm_starts_and_differs_from_wrapper_cold_start(
+        self, blurred, small_psf, monkeypatch
+    ):
+        def deterministic_denoise_bound(image, sigma):
+            return backend.xp.clip(image * 0.97 + 0.01, 0.0, 1.0)
+
+        def deterministic_denoise_method(self, image, sigma):
+            return deterministic_denoise_bound(image, sigma)
+
+        solver = REDDeconv(blurred, small_psf, sigma=0.05)
+        monkeypatch.setattr(solver, "_denoise", deterministic_denoise_bound)
+        monkeypatch.setattr(REDDeconv, "_denoise", deterministic_denoise_method)
+
+        solver.deblur(num_iter=5, lambda_reg=0.01, tol=0.0, min_iter=999)
+
+        warm_result = solver.deblur(
+            num_iter=1, lambda_reg=0.01, tol=0.0, min_iter=999
+        )
+        cold_result = red_deblur(
+            blurred, small_psf,
+            iters=1, lambda_reg=0.01, tol=0.0, min_iter=999,
+            sigma=0.05,
+        )
+
+        assert not np.allclose(warm_result, cold_result), (
+            "Repeated class calls should warm-start from the stored iterate, "
+            "unlike cold-start wrapper calls."
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -626,3 +744,7 @@ class TestMask:
         result = REDDeconv(blurred, small_psf).deblur(num_iter=3)
         h, w = result.shape
         assert h <= test_image.shape[0] and w <= test_image.shape[1]
+
+    def test_red_has_no_explicit_tv_boundary_operator_contract(self, solver):
+        """RED inherits masked fidelity from ADMM but has no TV-specific boundary split."""
+        assert solver.use_mask is True

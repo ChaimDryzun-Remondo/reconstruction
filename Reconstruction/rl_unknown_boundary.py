@@ -5,15 +5,24 @@ Algorithm: unknown-boundary RL with optional multiplicative TV regularisation
 (Dey et al. 2006).  No new ``__init__`` — all setup is handled by
 :class:`~._base.DeconvBase`.
 
+Boundary model
+--------------
+RL uses masked data fidelity on the original support over the padded FFT
+canvas inherited from :class:`~._base.DeconvBase`. When TV is active, the
+regularisation step uses the Dey-style multiplicative correction, which
+belongs to the Neumann-family TV operators rather than the periodic
+Fourier-diagonalized family.
+
 Public API
 ----------
 RLUnknownBoundary : DeconvBase subclass
     Stateful deconvolution object.  Instantiate once, call :meth:`deblur`
-    one or more times.
+    one or more times. Repeated object-level calls warm-start from the stored
+    ``estimated_image`` iterate by default.
 
 rl_deblur_unknown_boundary : convenience wrapper
     One-shot function.  Creates an ``RLUnknownBoundary``, calls ``deblur``,
-    and returns the result.
+    and returns the result. Each wrapper call is a fresh cold start.
 """
 from __future__ import annotations
 
@@ -35,7 +44,16 @@ class RLUnknownBoundary(DeconvBase):
     Inherits all constructor logic from :class:`DeconvBase` — no
     ``__init__`` override.  Implements only :meth:`deblur`.
 
-    See :class:`DeconvBase` for constructor parameters.
+    See :class:`DeconvBase` for constructor parameters. The effective
+    boundary model is:
+
+    - padded FFT canvas from :class:`DeconvBase`
+    - masked data fidelity on the observed support Ω
+    - circular convolution on the full padded canvas
+    - Neumann-family TV behaviour when ``lambda_tv > 0``
+
+    Repeated object-level :meth:`deblur` calls warm-start from the stored
+    ``estimated_image`` state unless a numerical failure interrupts the run.
     """
 
     def deblur(
@@ -71,6 +89,8 @@ class RLUnknownBoundary(DeconvBase):
         tv_on_full_canvas : bool
             If ``True``, TV acts on all pixels (full padded canvas).
             If ``False``, TV correction is masked to the observed region Ω.
+            In both cases the correction comes from the Neumann-family
+            multiplicative TV operator rather than a periodic gradient pair.
 
         Returns
         -------
@@ -91,21 +111,25 @@ class RLUnknownBoundary(DeconvBase):
         fshape = self.full_shape
 
         x_k = self.estimated_image.copy()
+        last_finite = x_k.copy()
 
         for k in range(num_iter):
 
             # ── Step 1: Forward model H x_k ──────────────────────────────
-            Hx_k = backend.irfft2(PF * backend.rfft2(x_k), s=fshape)
+            with backend.xp.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                Hx_k = backend.irfft2(PF * backend.rfft2(x_k), s=fshape)
 
             # ── Step 2: Ratio on observed support Ω ──────────────────────
             # Outside Ω (M=0): numerator=0, denominator≈1 → ratio≈0.
             ratio = (M * y) / ((Hx_k * M) + ((1.0 - M) + eps_dev))
 
             # ── Step 3: Back-projection H^T ratio ────────────────────────
-            back = backend.irfft2(conjPF * backend.rfft2(ratio), s=fshape)
+            with backend.xp.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                back = backend.irfft2(conjPF * backend.rfft2(ratio), s=fshape)
 
             # ── Step 4: Mask-normalised RL update ────────────────────────
-            x_new = x_k * (back / (HTM + eps_dev))
+            with backend.xp.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                x_new = x_k * (back / (HTM + eps_dev))
 
             # ── Step 5: Optional multiplicative TV correction ─────────────
             if use_tv:
@@ -118,6 +142,12 @@ class RLUnknownBoundary(DeconvBase):
 
             # ── Step 6: Positivity projection ────────────────────────────
             backend.xp.maximum(x_new, eps_pos, out=x_new)
+            self._fail_on_nonfinite(
+                x_new,
+                name="RL iterate",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
 
             # ── Step 7: Convergence check ─────────────────────────────────
             if k >= min_iter and (k + 1) % check_every == 0:
@@ -128,12 +158,13 @@ class RLUnknownBoundary(DeconvBase):
                     break
 
             x_k = x_new
+            last_finite = x_k.copy()
 
         else:
             self._log_no_convergence(num_iter, tol)
 
         # ── Step 8: Store, crop, and return ──────────────────────────────
-        return self._crop_and_return(x_k)
+        return self._crop_and_return(x_k, last_finite=last_finite)
 
 
 def rl_deblur_unknown_boundary(

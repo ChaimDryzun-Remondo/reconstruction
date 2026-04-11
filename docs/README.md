@@ -8,6 +8,126 @@ preprocessing, padded-canvas construction, binary mask M for unknown-boundary
 masking, PSF conditioning, frequency-domain precomputation, and GPU/CPU backend
 selection.
 
+## Boundary Handling
+
+The package does not currently expose a single public `boundary_policy` API.
+Instead, the effective boundary model is solver-family specific and is built
+from four layers:
+
+1. image padding onto an extended FFT canvas
+2. optional masking of the observed field of view
+3. circular FFT convolution on the padded canvas
+4. solver-specific TV / gradient operator assumptions
+
+### Common padded-canvas structure
+
+All solvers work on an extended canvas constructed by `DeconvBase`.
+The observed image is embedded into that canvas using the selected
+`paddingMode`. The PSF is zero-padded to the same canvas and shifted with
+`ifftshift` before FFT placement, so the forward operator `H` is always a
+circular convolution on the padded canvas.
+
+For the iterative solvers, the binary mask `M` is then used to restrict the
+data-fidelity term to the original observed support. This means the package's
+"unknown-boundary" abstraction is primarily a masked-fidelity abstraction, not
+a claim that every internal operator uses the same non-periodic boundary
+condition.
+
+### Solver-family contract
+
+- `WienerDeconv`:
+  padded / tapered circular deconvolution with no masked unknown-boundary
+  fidelity. It hard-forces `use_mask=False` and
+  `apply_taper_on_padding_band=True`.
+
+- `RLUnknownBoundary`, `LandweberUnknownBoundary`, `FISTADeconv`:
+  masked fidelity on the original support over a padded FFT canvas.
+  When TV is active, the TV step belongs to the Neumann family:
+  RL uses the Dey-style multiplicative TV correction, and
+  Landweber / FISTA use Chambolle's TV proximal solver.
+
+- `ChambollePockDeconv`, `ADMMDeconv`, `TVAL3Deconv`:
+  masked fidelity on the original support over a padded FFT canvas, with
+  periodic gradient / divergence operators. The periodic operator choice is
+  required because these solvers place `∇` and `∇^T∇` directly inside
+  Fourier-diagonalized updates.
+
+- `PnPADMM`, `REDDeconv`:
+  inherit ADMM's masked-fidelity and padded-FFT structure. They do not
+  currently define a separate public TV-boundary contract because their prior
+  step is denoiser-based rather than TV-prox based.
+
+### Practical implication
+
+Two solvers may both be "unknown-boundary" solvers in the package sense while
+still using different internal regularizer boundary assumptions. Cross-solver
+comparisons should therefore be interpreted as comparisons between related, but
+not identical, boundary models.
+
+## PSF Handling
+
+The current package default is a PSF preprocessing policy, not a pass-through
+contract for the user-supplied PSF array.
+
+For the iterative-family solvers (`RLUnknownBoundary`,
+`LandweberUnknownBoundary`, `FISTADeconv`, `ChambollePockDeconv`,
+`ADMMDeconv`, `TVAL3Deconv`, `PnPADMM`, `REDDeconv`), the default PSF pipeline
+is:
+
+1. Centre by centre of mass (`center_method="com"`).
+2. Clip negative values (`remove_negatives="clip"`).
+3. Enforce odd spatial shape (`enforce_odd_shape=True`).
+4. Condition the PSF by residual-background subtraction and outer radial taper
+   with `bg_ring_frac=0.15`, `taper_outer_frac=0.20`,
+   `taper_end_frac=0.50`.
+5. Zero-pad to the FFT canvas (`Type="Zero"`, `apply_taper=False`).
+6. Apply `ifftshift` before FFT placement.
+
+This policy is scientifically destructive in the sense that it may alter the
+submitted PSF centroid, support, negativity pattern, and wing amplitudes before
+the forward model is built.
+
+`WienerDeconv` shares the same centering, clipping, odd-shape enforcement,
+zero-padding, and `ifftshift` placement steps, but it currently uses a
+solver-specific conditioning override:
+
+- iterative-family default:
+  `bg_ring_frac=0.15`, `taper_outer_frac=0.20`, `taper_end_frac=0.50`
+- Wiener override:
+  `bg_ring_frac=0.15`, `taper_outer_frac=0.90`, `taper_end_frac=1.0`
+
+So Wiener and the iterative-family solvers do not, by default, operate on
+identically conditioned PSFs.
+
+## Statefulness and Repeated Calls
+
+The package currently has two distinct calling contracts:
+
+- Class instances for the iterative solvers
+  (`RLUnknownBoundary`, `LandweberUnknownBoundary`, `FISTADeconv`,
+  `ChambollePockDeconv`, `ADMMDeconv`, `TVAL3Deconv`, `PnPADMM`,
+  `REDDeconv`) are stateful warm-start solvers.
+  After a successful `deblur()` call, the final padded iterate is stored in
+  `estimated_image`, and the next object-level `deblur()` call starts from
+  that stored iterate by default.
+
+- Wrapper functions are stateless cold-start helpers.
+  Each wrapper call constructs a fresh solver object, runs `deblur()`, and
+  discards the internal state afterwards.
+
+- `WienerDeconv` is stateful for setup and diagnostics, but not for iterate
+  warm starts.
+  Repeated calls reuse constructor-time FFT setup and update diagnostic
+  fields such as `last_alpha` / `sigma_est`, but they do not read the prior
+  `estimated_image` as an initial iterate because Wiener is not iterative.
+
+- Numerical failure preserves finite state, but not necessarily the exact
+  pre-call state.
+  If an iterative run fails after making finite progress, the solver may keep
+  the last verified finite iterate reached during that failed call rather than
+  rolling all the way back to the pre-call iterate. The contract is
+  "state remains finite and reusable", not "state is unchanged on failure".
+
 ## Implemented Algorithms
 
 | Algorithm | Class | Wrapper | Status |

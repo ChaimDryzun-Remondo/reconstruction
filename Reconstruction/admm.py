@@ -64,6 +64,23 @@ Precision notes
 Internal computation uses float64 for numerical stability of dual variable
 accumulation.  Inputs and outputs remain float32/numpy per package convention.
 
+Boundary model
+--------------
+ADMM uses masked data fidelity on the original support over the padded FFT
+canvas inherited from :class:`~._base.DeconvBase`. Its TV prior interface is
+coupled directly to Fourier-diagonalized x-updates, so the default TV path
+uses periodic gradient / divergence operators. Subclasses such as PnP and RED
+inherit the same masked-fidelity and padded-FFT structure even when they
+replace the TV prior itself.
+
+Statefulness
+------------
+``ADMMDeconv`` is a stateful iterative solver. Repeated object-level
+``deblur()`` calls warm-start from the stored ``estimated_image`` iterate and
+replace diagnostic state such as ``cost_history`` and the reported final
+penalties. The wrapper ``admm_deblur`` is a cold-start helper that creates a
+fresh solver object for each call.
+
 References
 ----------
 [1] S. Boyd, N. Parikh, E. Chu, B. Peleato, J. Eckstein, "Distributed
@@ -100,6 +117,12 @@ class ADMMDeconv(DeconvBase):
 
     See module docstring for the full mathematical formulation.
 
+    Repeated object-level :meth:`deblur` calls warm-start from the stored
+    ``estimated_image`` iterate by default. On finite early-stop / divergence
+    paths, the solver stores and returns the last verified finite iterate.
+    On explicit numerical failure, it raises ``FloatingPointError`` while
+    preserving finite persistent state.
+
     Parameters
     ----------
     image : np.ndarray
@@ -132,6 +155,13 @@ class ADMMDeconv(DeconvBase):
     The four overridable methods (_prior_init, _prior_update,
     _prior_dual_update, _x_update_denom) allow subclasses to swap the default
     TV prior for a PnP denoiser without touching the ADMM scaffolding.
+
+    Effective boundary model for the default TV prior:
+
+    - padded FFT canvas from :class:`DeconvBase`
+    - masked data fidelity on the observed support Ω
+    - circular convolution on the full padded canvas
+    - periodic gradient / divergence operators in the TV split
     """
 
     _INIT_KEYS: frozenset[str] = DeconvBase._INIT_KEYS | frozenset({
@@ -578,6 +608,7 @@ class ADMMDeconv(DeconvBase):
         Hx_k: "backend.xp.ndarray" = backend.xp.real(
             backend.ifft2(self.H_full * backend.fft2(u))
         )
+        last_finite: "backend.xp.ndarray" = u.copy()
 
         # Initialise v and d_v
         v: "backend.xp.ndarray" = Hx_k.copy()
@@ -605,11 +636,30 @@ class ADMMDeconv(DeconvBase):
             # ── Step 1: v-update (pointwise, masked data fidelity) ─────────
             # v = (M⊙y + ρ_v(Hx_k + d_v)) / (M + ρ_v)
             v = (mask_f64 * y_f64 + rho_v * (Hx_k + d_v)) / (mask_f64 + rho_v)
+            self._fail_on_nonfinite(
+                v,
+                name="ADMM v-update state",
+                iteration=k,
+                last_finite=last_finite,
+            )
 
             # ── Step 2: Prior update (uses OLD u) ──────────────────────────
             # Overridable: updates state (w, etc.) and returns prior_rhs.
             prior_rhs: "backend.xp.ndarray" = self._prior_update(
                 u, state, lambda_tv, rho_w, _EPS_GRAD
+            )
+            for key, value in state.items():
+                self._fail_on_nonfinite(
+                    backend.xp.asarray(value),
+                    name=f"ADMM prior state ({key})",
+                    iteration=k,
+                    last_finite=last_finite,
+                )
+            self._fail_on_nonfinite(
+                prior_rhs,
+                name="ADMM prior RHS",
+                iteration=k,
+                last_finite=last_finite,
             )
 
             # ── Step 3: x-update (exact FFT solve) ─────────────────────────
@@ -621,30 +671,66 @@ class ADMMDeconv(DeconvBase):
                 + prior_rhs
             )
             denom = self._x_update_denom(rho_v, rho_w)
+            self._fail_on_nonfinite(
+                rhs,
+                name="ADMM x-update RHS",
+                iteration=k,
+                last_finite=last_finite,
+            )
+            self._fail_on_nonfinite(
+                denom,
+                name="ADMM x-update denominator",
+                iteration=k,
+                last_finite=last_finite,
+            )
             u = backend.xp.real(backend.ifft2(backend.fft2(rhs) / (denom + eps)))
 
             # ── Step 4: NaN/Inf guard ──────────────────────────────────────
-            if not bool(backend.xp.isfinite(u).all()):
-                logger.warning(
-                    "NaN/Inf in u at iteration %d; stopping early.", k
-                )
-                raise FloatingPointError(
-                    f"NaN/Inf encountered at iteration {k}; "
-                    "check lambda_tv or initial rho_v."
-                )
+            self._fail_on_nonfinite(
+                u,
+                name="ADMM primal iterate",
+                iteration=k,
+                last_finite=last_finite,
+            )
 
             # Positivity projection
             if _nonneg:
                 u = backend.xp.maximum(u, eps_pos)
+                self._fail_on_nonfinite(
+                    u,
+                    name="ADMM primal iterate after positivity projection",
+                    iteration=k,
+                    last_finite=last_finite,
+                )
 
             # ── Step 5: Recompute Hx with new u ───────────────────────────
             Hx_k = backend.xp.real(backend.ifft2(self.H_full * backend.fft2(u)))
+            self._fail_on_nonfinite(
+                Hx_k,
+                name="ADMM forward projection",
+                iteration=k,
+                last_finite=last_finite,
+            )
 
             # ── Step 6: Dual v-update ──────────────────────────────────────
             d_v += Hx_k - v
+            self._fail_on_nonfinite(
+                d_v,
+                name="ADMM data dual state",
+                iteration=k,
+                last_finite=last_finite,
+            )
 
             # ── Step 7: Prior dual update (uses NEW u) ─────────────────────
             self._prior_dual_update(u, state)
+            for key, value in state.items():
+                self._fail_on_nonfinite(
+                    backend.xp.asarray(value),
+                    name=f"ADMM prior state ({key})",
+                    iteration=k,
+                    last_finite=last_finite,
+                )
+            last_finite = u.copy()
 
             # ── Step 8: Cost + logging ──────────────────────────────────────
             cost = self._compute_admm_cost(Hx_k, lambda_tv, state, _tvnorm)
@@ -728,7 +814,10 @@ class ADMMDeconv(DeconvBase):
         self._last_rho_v = rho_v
         self._last_rho_w = rho_w
         del d_v, v, Hx_k, rhs, denom, prior_rhs
-        return self._crop_and_return(u.astype(backend.xp.float32))
+        return self._crop_and_return(
+            u.astype(backend.xp.float32),
+            last_finite=last_finite.astype(backend.xp.float32),
+        )
 
     # ══════════════════════════════════════════════════════════════════════
     # Properties

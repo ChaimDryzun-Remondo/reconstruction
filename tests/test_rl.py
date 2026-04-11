@@ -1,7 +1,7 @@
 """
 Phase 4a verification tests for Reconstruction.rl_unknown_boundary.
 
-Checks:
+    Checks:
   1. RLUnknownBoundary: init succeeds, correct state attributes.
   2. deblur(): output shape matches original image.
   3. deblur(): all output values are non-negative.
@@ -10,8 +10,10 @@ Checks:
   6. Convergence: early stopping triggers within max_iter.
   7. Wrapper: rl_deblur_unknown_boundary splits kwargs correctly.
   8. Regression: output matches docs/reference/RL_Unknown_Boundary.py
-     within atol=1e-5 (htm_floor_frac=0.0 disables the base-class floor
-     clamp so the two constructors are equivalent).
+     within atol=1e-5 only in finite regimes (the reference is not used
+     as a numerical-robustness oracle).
+  9. Numerical-failure contract: instability must raise and must not poison
+     persistent solver state.
 """
 from __future__ import annotations
 
@@ -83,6 +85,10 @@ class TestRLInit:
         import numpy as np
         mask_np = np.array(rl.mask)
         assert float(mask_np.sum()) == float(rl.h * rl.w)
+
+    def test_use_mask_true_by_default(self, rl):
+        """RLUnknownBoundary uses masked fidelity on the observed support."""
+        assert rl.use_mask is True
 
     def test_estimated_image_positive(self, rl):
         """Initial estimate must be strictly positive."""
@@ -196,6 +202,27 @@ class TestRLTVEffect:
             "Stronger TV should produce a smoother (lower TV) output"
         )
 
+    def test_tv_active_uses_multiplicative_tv_correction(
+        self, blurred_image, gaussian_psf, monkeypatch
+    ):
+        import Reconstruction.rl_unknown_boundary as rl_mod
+
+        calls: list[tuple[float, tuple[int, int]]] = []
+        original = rl_mod.tv_multiplicative_correction
+
+        def spy_tv_correction(x, lambda_tv):
+            calls.append((float(lambda_tv), tuple(x.shape)))
+            return original(x, lambda_tv)
+
+        monkeypatch.setattr(rl_mod, "tv_multiplicative_correction", spy_tv_correction)
+
+        RLUnknownBoundary(image=blurred_image, psf=gaussian_psf).deblur(
+            num_iter=1, lambda_tv=1e-3, tol=0.0, min_iter=1,
+        )
+
+        assert calls, "RL TV path should call tv_multiplicative_correction"
+        assert calls[0][0] == pytest.approx(1e-3)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 5. Convergence behaviour
@@ -238,6 +265,22 @@ class TestRLConvergence:
         new_est = np.array(rl.estimated_image)
         assert not np.allclose(init_est, new_est), (
             "estimated_image should be updated by deblur()"
+        )
+
+    def test_repeated_object_call_warm_starts_and_differs_from_wrapper_cold_start(
+        self, blurred_image, gaussian_psf
+    ):
+        solver = RLUnknownBoundary(image=blurred_image, psf=gaussian_psf)
+        solver.deblur(num_iter=5, lambda_tv=0.0, tol=0.0)
+
+        warm_result = solver.deblur(num_iter=1, lambda_tv=0.0, tol=0.0)
+        cold_result = rl_deblur_unknown_boundary(
+            blurred_image, gaussian_psf, num_iter=1, lambda_tv=0.0, tol=0.0,
+        )
+
+        assert not np.allclose(warm_result, cold_result), (
+            "Repeated class calls should warm-start from the stored iterate, "
+            "unlike cold-start wrapper calls."
         )
 
 
@@ -328,7 +371,8 @@ def _load_reference_module():
                     reason="Reference file not found")
 class TestRLRegression:
     """
-    Regression: new RLUnknownBoundary must match the reference within atol=1e-5.
+    Regression: new RLUnknownBoundary must match the reference within atol=1e-5
+    only on finite comparison cases.
 
     The constructor in the reference does NOT apply the HTM floor clamp that
     DeconvBase adds.  Passing ``htm_floor_frac=0.0`` to the new constructor
@@ -341,14 +385,14 @@ class TestRLRegression:
     def ref_mod(self):
         return _load_reference_module()
 
-    def test_no_tv_50_iter(self, blurred_image, gaussian_psf, ref_mod):
-        """No-TV case: 50 iterations, both implementations agree within 1e-5."""
+    def test_no_tv_1_iter_finite_regression(self, blurred_image, gaussian_psf, ref_mod):
+        """No-TV regression is only asserted in a regime where both paths stay finite."""
         # Reference
         ref_rl = ref_mod.RLUnknownBoundary(
             image=blurred_image, psf=gaussian_psf,
         )
         ref_result = ref_rl.deblur(
-            num_iter=50, lambda_tv=0.0, tol=1e-6,
+            num_iter=1, lambda_tv=0.0, tol=0.0,
         )
 
         # New implementation — disable floor clamp to match reference
@@ -356,56 +400,127 @@ class TestRLRegression:
             image=blurred_image, psf=gaussian_psf, htm_floor_frac=0.0,
         )
         new_result = new_rl.deblur(
-            num_iter=50, lambda_tv=0.0, tol=1e-6,
+            num_iter=1, lambda_tv=0.0, tol=0.0,
         )
 
+        assert np.isfinite(ref_result).all()
+        assert np.isfinite(new_result).all()
         np.testing.assert_allclose(
             new_result, ref_result, atol=1e-5,
             err_msg="No-TV regression failed: new != reference within atol=1e-5",
         )
 
-    def test_with_tv_50_iter(self, blurred_image, gaussian_psf, ref_mod):
-        """TV case: 50 iterations with lambda_tv=0.0002, agree within 1e-5."""
+    def test_with_tv_1_iter_finite_regression(self, blurred_image, gaussian_psf, ref_mod):
+        """TV regression is only asserted in a regime where both paths stay finite."""
         ref_rl = ref_mod.RLUnknownBoundary(
             image=blurred_image, psf=gaussian_psf,
         )
         ref_result = ref_rl.deblur(
-            num_iter=50, lambda_tv=0.0002, tol=1e-6,
+            num_iter=1, lambda_tv=0.0002, tol=0.0,
         )
 
         new_rl = RLUnknownBoundary(
             image=blurred_image, psf=gaussian_psf, htm_floor_frac=0.0,
         )
         new_result = new_rl.deblur(
-            num_iter=50, lambda_tv=0.0002, tol=1e-6,
+            num_iter=1, lambda_tv=0.0002, tol=0.0,
         )
 
+        assert np.isfinite(ref_result).all()
+        assert np.isfinite(new_result).all()
         np.testing.assert_allclose(
             new_result, ref_result, atol=1e-5,
             err_msg="TV regression failed: new != reference within atol=1e-5",
         )
 
-    def test_tv_full_canvas_false_regression(self, blurred_image, gaussian_psf,
-                                             ref_mod):
-        """tv_on_full_canvas=False: 20 iterations, agree within 1e-5."""
+    def test_tv_full_canvas_false_finite_regression(self, blurred_image, gaussian_psf,
+                                                    ref_mod):
+        """Masked-TV regression is asserted only on a finite one-step comparison."""
         ref_rl = ref_mod.RLUnknownBoundary(
             image=blurred_image, psf=gaussian_psf,
         )
         ref_result = ref_rl.deblur(
-            num_iter=20, lambda_tv=0.001, tol=1e-6, tv_on_full_canvas=False,
+            num_iter=1, lambda_tv=0.001, tol=0.0, tv_on_full_canvas=False,
         )
 
         new_rl = RLUnknownBoundary(
             image=blurred_image, psf=gaussian_psf, htm_floor_frac=0.0,
         )
         new_result = new_rl.deblur(
-            num_iter=20, lambda_tv=0.001, tol=1e-6, tv_on_full_canvas=False,
+            num_iter=1, lambda_tv=0.001, tol=0.0, tv_on_full_canvas=False,
         )
 
+        assert np.isfinite(ref_result).all()
+        assert np.isfinite(new_result).all()
         np.testing.assert_allclose(
             new_result, ref_result, atol=1e-5,
             err_msg=(
                 "tv_on_full_canvas=False regression failed: "
                 "new != reference within atol=1e-5"
             ),
+        )
+
+
+class TestRLNumericalFailureContract:
+    """Numerical instability should raise rather than return/store non-finite data."""
+
+    def test_known_blow_up_case_raises_instead_of_returning_nonfinite_output(
+        self, blurred_image, gaussian_psf
+    ):
+        solver = RLUnknownBoundary(
+            image=blurred_image, psf=gaussian_psf, htm_floor_frac=0.0,
+        )
+        with pytest.raises(FloatingPointError):
+            solver.deblur(num_iter=50, lambda_tv=0.0, tol=1e-6)
+
+    def test_failed_run_does_not_overwrite_estimated_image_with_nonfinite_values(
+        self, blurred_image, gaussian_psf, monkeypatch
+    ):
+        import Reconstruction.rl_unknown_boundary as rl_mod
+
+        solver = RLUnknownBoundary(image=blurred_image, psf=gaussian_psf)
+        initial = np.array(solver.estimated_image, copy=True)
+
+        def _nan_correction(x, lambda_tv):
+            return backend.xp.full_like(x, backend.xp.nan)
+
+        monkeypatch.setattr(rl_mod, "tv_multiplicative_correction", _nan_correction)
+
+        with pytest.raises(FloatingPointError):
+            solver.deblur(
+                num_iter=1, lambda_tv=1e-3, tol=0.0, min_iter=0, check_every=1,
+            )
+
+        final_state = np.array(solver.estimated_image)
+        assert np.isfinite(final_state).all()
+        np.testing.assert_allclose(final_state, initial, atol=0.0, rtol=0.0)
+
+    def test_late_failure_may_preserve_last_finite_iterate_from_failed_call(
+        self, blurred_image, gaussian_psf, monkeypatch
+    ):
+        import Reconstruction.rl_unknown_boundary as rl_mod
+
+        solver = RLUnknownBoundary(image=blurred_image, psf=gaussian_psf)
+        initial = np.array(solver.estimated_image, copy=True)
+        calls = {"count": 0}
+
+        def _staged_correction(x, lambda_tv):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return backend.xp.ones_like(x)
+            return backend.xp.full_like(x, backend.xp.nan)
+
+        monkeypatch.setattr(rl_mod, "tv_multiplicative_correction", _staged_correction)
+
+        with pytest.raises(FloatingPointError):
+            solver.deblur(
+                num_iter=2, lambda_tv=1e-3, tol=0.0, min_iter=99, check_every=1,
+            )
+
+        final_state = np.array(solver.estimated_image)
+        assert np.isfinite(final_state).all()
+        assert not np.allclose(final_state, initial), (
+            "A late failure may preserve the last verified finite iterate "
+            "reached during the failed call, not necessarily the exact "
+            "pre-call state."
         )

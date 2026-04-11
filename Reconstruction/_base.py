@@ -6,12 +6,20 @@ Owns the entire forward-model setup shared by every algorithm:
   - Image validation, grayscale conversion, odd-dimension enforcement
   - Normalization, canvas sizing, padding
   - Binary (or full) mask construction
-  - PSF conditioning and frequency-domain precomputation (PF, conjPF)
+  - Destructive PSF preprocessing, conditioning, and frequency-domain
+    precomputation (PF, conjPF)
   - H^T M precomputation with relative floor clamp
   - Lipschitz constant estimation
   - Initial estimate construction
 
 Subclasses implement only ``deblur()``.
+
+Important boundary-model note:
+``DeconvBase`` defines only the padded-canvas, PSF-placement, and mask layers
+shared by the package. That is only part of the full boundary model. Solver
+families may still differ in how their TV / gradient operators treat the
+canvas boundary (for example Neumann-family TV prox versus periodic
+gradient/divergence pairs).
 """
 from __future__ import annotations
 
@@ -46,6 +54,11 @@ class DeconvBase(ABC):
     Handles all shared forward-model setup in ``__init__``.  Subclasses
     implement only :meth:`deblur`.
 
+    ``DeconvBase`` should therefore be read as a shared forward-model scaffold,
+    not as a complete boundary-condition contract. Padding and masking are
+    universal here, but the full effective boundary model also depends on the
+    solver-specific regularizer / operator layer.
+
     The constructor performs 13 steps in order:
 
     1.  Validate the input image.
@@ -57,10 +70,23 @@ class DeconvBase(ABC):
     7.  GPU warm-up (if GPU backend is active).
     8.  Pad the observed image onto the canvas.
     9.  Build the binary mask M (or all-ones if ``use_mask=False``).
-    10. PSF conditioning + zero-padding + ifftshift + rfft2 → PF, conjPF.
+    10. Destructive PSF preprocessing policy
+        (COM centering, negative clipping, odd-shape enforcement,
+        conditioning, zero-padding, ifftshift) + rfft2 → PF, conjPF.
     11. Precompute H^T M with a relative floor clamp.
     12. Estimate the Lipschitz constant L = max |H(f)|².
     13. Construct the initial estimate on the padded canvas.
+
+    Statefulness contract
+    ---------------------
+    ``self.estimated_image`` is the persistent object-level iterate state.
+    Iterative subclasses typically start each new :meth:`deblur` call from
+    ``self.estimated_image`` and overwrite it on successful completion. This
+    makes repeated object-level calls warm starts by default unless a subclass
+    explicitly documents otherwise.
+
+    Convenience wrappers are not stateful: they instantiate a fresh solver,
+    call :meth:`deblur`, and discard the object.
 
     Class Attributes
     ----------------
@@ -77,17 +103,26 @@ class DeconvBase(ABC):
     image : np.ndarray
         Observed (blurred + noisy) image.  2-D grayscale or 3-D RGB.
     psf : np.ndarray
-        Point spread function (before conditioning).  Values must be
-        non-negative; it will be normalised inside the constructor.
+        Point spread function before the package default preprocessing policy
+        is applied. The current default policy is destructive: the PSF is
+        re-centred by centre of mass, negative values are clipped, odd shape
+        is enforced, the tails are conditioned, the result is zero-padded to
+        the FFT canvas, and `ifftshift` is applied before FFT placement. This
+        may alter the supplied PSF centroid, support, and wing amplitudes.
     paddingMode : PaddingStr, optional
         Edge-extension mode for the padded canvas.  Default ``"Reflect"``.
+        This controls how the observed image is embedded into the FFT canvas,
+        but it does not by itself determine the full solver boundary model.
     padding_scale : float, optional
         Padding width as a multiple of the PSF size on each side.
         Default 2.0.  Larger values reduce wrap-around artefacts at the
         cost of a bigger FFT.
     initialEstimate : np.ndarray or None, optional
         Initial guess for the deconvolved image.  If ``None``, the
-        normalised observed image is used.
+        normalised observed image is used. The padded, working-domain version
+        of this initial guess becomes ``self.estimated_image``, which is also
+        the persistent per-object iterate state across repeated calls for the
+        iterative solver families.
     apply_taper_on_padding_band : bool, optional
         Apply a cosine taper on the padding band to suppress boundary
         discontinuities.  Default ``False``.
@@ -99,7 +134,9 @@ class DeconvBase(ABC):
         If ``True`` (default), build a binary mask M that equals 1 on the
         original image support Ω and 0 outside.  If ``False``, M = 1
         everywhere (no masking — suitable for algorithms like Wiener that
-        do not support masked data fidelity).
+        do not support masked data fidelity).  This mask defines only the
+        data-fidelity support; it does not imply that all other operators in
+        the solver use the same boundary condition.
     """
 
     _INIT_KEYS: frozenset[str] = frozenset({
@@ -149,6 +186,9 @@ class DeconvBase(ABC):
         # ── Step 4: Normalise to [0, 1] float ─────────────────────────────
         # Keeps FFT magnitudes well-conditioned and makes noise-variance
         # estimates directly comparable to the signal range.
+        gray_working_raw = gray.astype(np.float64, copy=True)
+        gray_min = float(np.min(gray_working_raw))
+        gray_max = float(np.max(gray_working_raw))
         gray = image_normalization(image=gray, bit_depth=1, is_int=False)
 
         # ── Step 5: Store original size — SINGLE assignment ────────────────
@@ -290,7 +330,39 @@ class DeconvBase(ABC):
         logger.debug("Lipschitz constant L = %.6f", self._lipschitz)
 
         # ── Step 13: Initial estimate on the padded canvas ────────────────
-        init_source = initialEstimate if initialEstimate is not None else gray
+        # If provided, the initial estimate must live in the same working
+        # domain as the observation: grayscale, odd-cropped, and scaled
+        # with the *image-derived* affine map rather than its own min/max.
+        if initialEstimate is not None:
+            validate_image(initialEstimate)
+            init_source = to_grayscale(initialEstimate)
+
+            init_H, init_W = init_source.shape
+            init_OH = init_H if init_H % 2 == 1 else init_H - 1
+            init_OW = init_W if init_W % 2 == 1 else init_W - 1
+            if init_OH <= 0 or init_OW <= 0:
+                raise ValueError(
+                    "initialEstimate is too small after enforcing odd spatial shape "
+                    f"(result would be {init_OH}x{init_OW})."
+                )
+            if (init_OH, init_OW) != (init_H, init_W):
+                init_source = odd_crop_around_center(init_source, (init_OH, init_OW))
+
+            if init_source.shape != (self.h, self.w):
+                raise ValueError(
+                    "initialEstimate must match the image working-domain shape "
+                    f"after grayscale/odd-shape preprocessing; got {init_source.shape}, "
+                    f"expected {(self.h, self.w)}."
+                )
+
+            init_source = init_source.astype(np.float64, copy=False)
+            if gray_max > gray_min:
+                init_source = (init_source - gray_min) / (gray_max - gray_min)
+            else:
+                init_source = init_source.copy()
+        else:
+            init_source = gray
+
         self.estimated_image: "backend.xp.ndarray" = backend.xp.array(
             padding(
                 image=init_source,
@@ -335,7 +407,54 @@ class DeconvBase(ABC):
     # Shared helper methods
     # ══════════════════════════════════════════════════════════════════════
 
-    def _crop_and_return(self, x_k: xp.ndarray) -> np.ndarray:
+    def _restore_last_finite_state(self, last_finite: Optional["backend.xp.ndarray"]) -> None:
+        """
+        Restore ``self.estimated_image`` from the most recent verified-finite iterate.
+
+        If ``last_finite`` is ``None`` or itself non-finite, the existing solver
+        state is left untouched. This helper intentionally preserves the most
+        recent finite iterate, which may come from the current failed call
+        rather than from the exact pre-call state.
+        """
+        if last_finite is None:
+            return
+        if not bool(backend.xp.isfinite(last_finite).all()):
+            return
+        self.estimated_image = last_finite.copy()
+
+    def _fail_on_nonfinite(
+        self,
+        arr: "backend.xp.ndarray",
+        *,
+        name: str,
+        iteration: Optional[int] = None,
+        last_finite: Optional["backend.xp.ndarray"] = None,
+    ) -> None:
+        """
+        Raise ``FloatingPointError`` if ``arr`` contains NaN/Inf values.
+
+        Optionally restores ``self.estimated_image`` from ``last_finite`` before
+        raising so solver state remains finite and reusable after failure.
+        The guarantee is finite-state preservation, not rollback to the exact
+        state that existed before the current :meth:`deblur` call started.
+        """
+        if bool(backend.xp.isfinite(arr).all()):
+            return
+
+        self._restore_last_finite_state(last_finite)
+
+        iter_msg = f" at iteration {iteration}" if iteration is not None else ""
+        logger.warning("Non-finite values detected in %s%s.", name, iter_msg)
+        raise FloatingPointError(
+            f"Non-finite values detected in {name}{iter_msg}."
+        )
+
+    def _crop_and_return(
+        self,
+        x_k: "backend.xp.ndarray",
+        *,
+        last_finite: Optional["backend.xp.ndarray"] = None,
+    ) -> np.ndarray:
         """
         Store the final state, crop to the original FOV, and transfer to CPU.
 
@@ -343,14 +462,34 @@ class DeconvBase(ABC):
         ----------
         x_k : xp.ndarray, shape self.full_shape
             The final iterate on the padded canvas.
+        last_finite : xp.ndarray or None, optional
+            Most recent verified-finite iterate.  Used to preserve solver state
+            if ``x_k`` is non-finite.
 
         Returns
         -------
         np.ndarray, shape (self.h, self.w)
             Deconvolved image cropped to the original field of view.
+
+        Notes
+        -----
+        On success this method overwrites ``self.estimated_image`` with the
+        supplied padded-canvas iterate. That stored iterate is the warm-start
+        state used by the iterative solver families on later object-level
+        :meth:`deblur` calls.
         """
+        self._fail_on_nonfinite(
+            x_k, name="final iterate", last_finite=last_finite
+        )
         self.estimated_image = x_k.copy()
-        return backend._to_numpy(cropping(x_k, (self.h, self.w)))
+        result = backend._to_numpy(cropping(x_k, (self.h, self.w)))
+        if not bool(np.isfinite(result).all()):
+            self._restore_last_finite_state(last_finite)
+            logger.warning("Non-finite values detected in cropped return array.")
+            raise FloatingPointError(
+                "Non-finite values detected in cropped return array."
+            )
+        return result
 
     def _check_convergence(
         self,
@@ -392,9 +531,28 @@ class DeconvBase(ABC):
         converged : bool
             ``True`` if ``rel_change < tol``.
         """
+        self._fail_on_nonfinite(x_new, name="x_new for convergence check")
+        self._fail_on_nonfinite(x_old, name="x_old for convergence check")
+
         den = backend.xp.linalg.norm(x_new)
+        if not bool(backend.xp.isfinite(den)):
+            logger.warning("Non-finite denominator norm in convergence check.")
+            raise FloatingPointError(
+                "Non-finite denominator norm in convergence check."
+            )
         den = den if float(den) > 0.0 else backend.xp.float32(eps)
-        rel_chg = float(backend.xp.linalg.norm(x_new - x_old) / den)
+        num = backend.xp.linalg.norm(x_new - x_old)
+        if not bool(backend.xp.isfinite(num)):
+            logger.warning("Non-finite numerator norm in convergence check.")
+            raise FloatingPointError(
+                "Non-finite numerator norm in convergence check."
+            )
+        rel_chg = float(num / den)
+        if not np.isfinite(rel_chg):
+            logger.warning("Non-finite relative change in convergence check.")
+            raise FloatingPointError(
+                "Non-finite relative change in convergence check."
+            )
         converged = rel_chg < tol
         if converged:
             logger.info(

@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 
 import Reconstruction._backend as backend
+import Reconstruction._base as base_module
 from Reconstruction._base import DeconvBase
 
 
@@ -34,6 +35,35 @@ class _TestDeconv(DeconvBase):
 
     def deblur(self, **kwargs) -> np.ndarray:
         return self._crop_and_return(self.estimated_image)
+
+
+def _to_expected_working_domain(image: np.ndarray) -> np.ndarray:
+    """Mirror the intended working-domain contract in test space."""
+    if image.ndim == 2:
+        gray = image.astype(np.float64)
+    elif image.ndim == 3 and image.shape[2] == 3:
+        gray = (
+            0.2989 * image[:, :, 0]
+            + 0.5870 * image[:, :, 1]
+            + 0.1140 * image[:, :, 2]
+        ).astype(np.float64)
+    elif image.ndim == 3 and image.shape[2] == 1:
+        gray = image[:, :, 0].astype(np.float64)
+    else:
+        raise ValueError(f"Unsupported image shape for test helper: {image.shape}")
+
+    H, W = gray.shape
+    OH = H if H % 2 == 1 else H - 1
+    OW = W if W % 2 == 1 else W - 1
+    off_y = (H - OH) // 2
+    off_x = (W - OW) // 2
+    gray = gray[off_y:off_y + OH, off_x:off_x + OW]
+
+    vmin = float(gray.min())
+    vmax = float(gray.max())
+    if vmax > vmin:
+        gray = (gray - vmin) / (vmax - vmin)
+    return gray
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -218,6 +248,78 @@ class TestPSFPrecomputation:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 3b. PSF pipeline contract
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPSFPipelineContract:
+    """Lock the current iterative-family PSF preprocessing pipeline."""
+
+    def test_iterative_family_psf_preprocess_defaults(self, test_image, gaussian_psf, monkeypatch):
+        captured: dict[str, dict] = {}
+
+        def fake_psf_preprocess(psf, **kwargs):
+            captured["preprocess"] = kwargs
+            return np.asarray(psf, dtype=np.float64)
+
+        def fake_condition_psf(psf, **kwargs):
+            captured["condition"] = kwargs
+            return np.asarray(psf, dtype=np.float64)
+
+        monkeypatch.setattr(base_module, "psf_preprocess", fake_psf_preprocess)
+        monkeypatch.setattr(base_module, "condition_psf", fake_condition_psf)
+
+        _TestDeconv(test_image, gaussian_psf)
+
+        assert captured["preprocess"] == {
+            "center_method": "com",
+            "remove_negatives": "clip",
+            "eps": 1e-12,
+            "enforce_odd_shape": True,
+        }
+        assert captured["condition"] == {
+            "bg_ring_frac": 0.15,
+            "taper_outer_frac": 0.20,
+            "taper_end_frac": 0.50,
+        }
+
+    def test_iterative_family_psf_zero_padding_and_ifftshift(self, test_image, gaussian_psf, monkeypatch):
+        original_padding = base_module.padding
+        captured: dict[str, object] = {}
+
+        def fake_padding(image, full_size, Type, apply_taper=False):
+            if Type == "Zero" and image.shape == gaussian_psf.shape:
+                captured["padding_call"] = {
+                    "full_size": full_size,
+                    "Type": Type,
+                    "apply_taper": apply_taper,
+                }
+                return np.full(full_size, 7.0, dtype=np.float32)
+            return original_padding(
+                image=image,
+                full_size=full_size,
+                Type=Type,
+                apply_taper=apply_taper,
+            )
+
+        def fake_ifftshift(arr):
+            if captured.get("padding_call") and np.all(arr == 7.0):
+                captured["ifftshift_seen"] = True
+            return np.fft.ifftshift(arr)
+
+        monkeypatch.setattr(base_module, "padding", fake_padding)
+        monkeypatch.setattr(base_module.backend, "ifftshift", fake_ifftshift)
+
+        obj = _TestDeconv(test_image, gaussian_psf)
+
+        assert captured["padding_call"] == {
+            "full_size": obj.full_shape,
+            "Type": "Zero",
+            "apply_taper": False,
+        }
+        assert captured.get("ifftshift_seen") is True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 4. Initial estimate
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -245,6 +347,79 @@ class TestInitialEstimate:
         """estimated_image must NOT be frozen (algorithms modify it)."""
         est_np = np.asarray(deconv.estimated_image)
         assert est_np.flags.writeable, "estimated_image should be writable"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 4b. Working-domain contract
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestWorkingDomainContract:
+    """Lock the chosen grayscale/odd/normalised working-domain contract."""
+
+    def test_image_preprocessing_uses_grayscale_odd_normalized_domain(self, gaussian_psf):
+        image = np.arange(6 * 8 * 3, dtype=np.float64).reshape(6, 8, 3)
+        deconv = _TestDeconv(image, gaussian_psf)
+
+        expected = _to_expected_working_domain(image)
+        result = deconv.deblur()
+
+        assert deconv.h == expected.shape[0]
+        assert deconv.w == expected.shape[1]
+        assert result.ndim == 2
+        assert result.shape == expected.shape
+        assert float(result.min()) >= 0.0
+        assert float(result.max()) <= 1.0
+        np.testing.assert_allclose(result, expected, atol=1e-6)
+
+    def test_default_initial_estimate_matches_image_working_domain(self, gaussian_psf):
+        image = np.linspace(10.0, 30.0, 6 * 8 * 3, dtype=np.float64).reshape(6, 8, 3)
+        deconv = _TestDeconv(image, gaussian_psf)
+
+        expected = _to_expected_working_domain(image)
+        result = deconv.deblur()
+
+        np.testing.assert_allclose(result, expected, atol=1e-6)
+        np.testing.assert_allclose(
+            result,
+            np.asarray(deconv.image)[
+                (deconv.full_shape[0] - deconv.h) // 2:(deconv.full_shape[0] + deconv.h) // 2,
+                (deconv.full_shape[1] - deconv.w) // 2:(deconv.full_shape[1] + deconv.w) // 2,
+            ],
+            atol=1e-6,
+        )
+
+    def test_initial_estimate_must_be_transformed_into_same_working_domain(
+        self, gaussian_psf
+    ):
+        image = np.linspace(0.0, 255.0, 6 * 8 * 3, dtype=np.float64).reshape(6, 8, 3)
+        initial = np.linspace(100.0, 400.0, 6 * 8, dtype=np.float64).reshape(6, 8)
+
+        deconv = _TestDeconv(image, gaussian_psf, initialEstimate=initial)
+        result = deconv.deblur()
+        image_working = _to_expected_working_domain(image)
+        initial_gray = initial[0:5, 0:7].astype(np.float64)
+        image_gray = (
+            0.2989 * image[:, :, 0]
+            + 0.5870 * image[:, :, 1]
+            + 0.1140 * image[:, :, 2]
+        ).astype(np.float64)
+        image_gray = image_gray[0:5, 0:7]
+        image_min = float(image_gray.min())
+        image_max = float(image_gray.max())
+        expected = (initial_gray - image_min) / (image_max - image_min)
+
+        assert image_working.shape == expected.shape
+
+        np.testing.assert_allclose(result, expected, atol=1e-6)
+
+    def test_output_is_returned_in_working_domain_grayscale_scale(self, gaussian_psf):
+        image = np.linspace(5.0, 55.0, 6 * 8 * 3, dtype=np.float64).reshape(6, 8, 3)
+        result = _TestDeconv(image, gaussian_psf).deblur()
+
+        assert result.ndim == 2
+        assert result.shape == (5, 7)
+        assert float(result.min()) >= 0.0
+        assert float(result.max()) <= 1.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -345,6 +520,22 @@ class TestCheckConvergence:
             x_new, x_old, k=0, num_iter=10, tol=1e-6
         )
         assert np.isfinite(rel_chg), "rel_change should be finite even when x_new=0"
+
+    def test_nan_iterate_raises_floating_point_error(self, deconv):
+        """Non-finite convergence norms must be treated as numerical failure."""
+        x_new = np.ones(deconv.full_shape, dtype=np.float32)
+        x_new[0, 0] = np.nan
+        x_old = np.ones(deconv.full_shape, dtype=np.float32)
+        with pytest.raises(FloatingPointError):
+            deconv._check_convergence(x_new, x_old, k=0, num_iter=10, tol=1e-6)
+
+    def test_inf_iterate_raises_floating_point_error(self, deconv):
+        """Infinite iterates must not be interpreted as a valid residual."""
+        x_new = np.ones(deconv.full_shape, dtype=np.float32)
+        x_old = np.ones(deconv.full_shape, dtype=np.float32)
+        x_old[0, 0] = np.inf
+        with pytest.raises(FloatingPointError):
+            deconv._check_convergence(x_new, x_old, k=0, num_iter=10, tol=1e-6)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

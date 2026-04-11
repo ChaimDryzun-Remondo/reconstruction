@@ -257,3 +257,36 @@ class TestWrapperSignatures:
         params = list(inspect.signature(pnp_admm_deblur).parameters.keys())
         assert params[0] == "image"
         assert params[1] == "psf"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 10. Working-domain API compatibility points
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestWorkingDomainApiContract:
+
+    def test_wiener_constructor_keeps_normalize_image_kwarg_for_compatibility(self):
+        """normalize_image remains part of the Wiener public constructor API."""
+        import Reconstruction
+
+        params = inspect.signature(Reconstruction.WienerDeconv).parameters
+        assert "normalize_image" in params
+
+    def test_core_classes_accept_initial_estimate_constructor_kwarg(self):
+        """initialEstimate remains supported at the root-class constructor level."""
+        import Reconstruction
+
+        image = np.ones((9, 9), dtype=np.float64)
+        psf = np.ones((3, 3), dtype=np.float64) / 9.0
+        initial = np.full((9, 9), 0.5, dtype=np.float64)
+
+        for name in (
+            "WienerDeconv",
+            "RLUnknownBoundary",
+            "LandweberUnknownBoundary",
+            "ADMMDeconv",
+            "TVAL3Deconv",
+        ):
+            cls = getattr(Reconstruction, name)
+            obj = cls(image, psf, initialEstimate=initial)
+            assert obj is not None, f"{name} should accept initialEstimate"

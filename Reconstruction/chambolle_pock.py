@@ -79,6 +79,21 @@ References
 
 [Was20] Wasilewski, P. "Condat-Vu splitting: a unified primal-dual
         framework." (Tutorial notes, 2020.)
+
+Boundary model
+--------------
+Chambolle-Pock uses masked data fidelity on the original support over the
+padded FFT canvas inherited from :class:`~._base.DeconvBase`, together with
+periodic gradient / divergence operators. The periodic choice is part of the
+package contract for this solver family because the dual coupling lives inside
+the global primal-dual iteration rather than in a standalone TV proximal step.
+
+Statefulness
+------------
+``ChambollePockDeconv`` is a stateful iterative solver. Repeated object-level
+``deblur()`` calls warm-start from the stored ``estimated_image`` iterate,
+whereas the wrapper ``chambolle_pock_deblur`` constructs a fresh solver each
+time.
 """
 from __future__ import annotations
 
@@ -113,6 +128,10 @@ class ChambollePockDeconv(DeconvBase):
     Unlike standard Chambolle-Pock, the smooth data-fidelity term G is
     handled via an explicit gradient step rather than a proximal operator,
     enabling efficient FFT-based computation even when the mask M is present.
+
+    Repeated object-level :meth:`deblur` calls warm-start from the stored
+    ``estimated_image`` iterate by default. The one-shot wrapper remains a
+    cold-start helper.
 
     Parameters
     ----------
@@ -158,6 +177,13 @@ class ChambollePockDeconv(DeconvBase):
     the global iteration structure, not a standalone proximal sub-problem.
     This ensures the adjoint relation ⟨K^T p, x⟩ = ⟨p, Kx⟩ holds
     consistently throughout — see CLAUDE.md pitfall #8.
+
+    Effective boundary model:
+
+    - padded FFT canvas from :class:`DeconvBase`
+    - masked data fidelity on the observed support Ω
+    - circular convolution on the full padded canvas
+    - periodic gradient / divergence operators in the primal-dual TV term
     """
 
     _INIT_KEYS: frozenset[str] = DeconvBase._INIT_KEYS | frozenset({
@@ -312,37 +338,110 @@ class ChambollePockDeconv(DeconvBase):
         x_bar = x.copy()                      # extrapolated point
         p_h   = backend.xp.zeros_like(x)             # dual variable (vertical)
         p_w   = backend.xp.zeros_like(x)             # dual variable (horizontal)
+        last_finite = x.copy()
 
         for k in range(num_iter):
             x_old = x
+            self._fail_on_nonfinite(
+                x_bar,
+                name="Chambolle-Pock extrapolated state x_bar",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
 
             # ── 1. Dual update ────────────────────────────────────────────
             # Gradient of the extrapolated point
             dx_bar, dy_bar = forward_grad_periodic(x_bar)
+            self._fail_on_nonfinite(
+                dx_bar,
+                name="Chambolle-Pock dual gradient dx_bar",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
+            self._fail_on_nonfinite(
+                dy_bar,
+                name="Chambolle-Pock dual gradient dy_bar",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
             p_h_tilde = p_h + sigma * dx_bar
             p_w_tilde = p_w + sigma * dy_bar
             del dx_bar, dy_bar
+            self._fail_on_nonfinite(
+                p_h_tilde,
+                name="Chambolle-Pock dual state p_h_tilde",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
+            self._fail_on_nonfinite(
+                p_w_tilde,
+                name="Chambolle-Pock dual state p_w_tilde",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
 
             # Project onto the constraint set for F*
             p_h_new, p_w_new = self._dual_project(p_h_tilde, p_w_tilde, lam)
             del p_h_tilde, p_w_tilde
+            self._fail_on_nonfinite(
+                p_h_new,
+                name="Chambolle-Pock dual variable p_h",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
+            self._fail_on_nonfinite(
+                p_w_new,
+                name="Chambolle-Pock dual variable p_w",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
 
             # ── 2. Primal gradient ∇G(x) = H^T [M ⊙ (Hx − y)] ──────────
             Hx    = backend.irfft2(PF * backend.rfft2(x), s=s)
+            self._fail_on_nonfinite(
+                Hx,
+                name="Chambolle-Pock forward model Hx",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
             resid = M * (Hx - y)
+            self._fail_on_nonfinite(
+                resid,
+                name="Chambolle-Pock residual",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
             grad_G = backend.irfft2(cPF * backend.rfft2(resid), s=s)
             del Hx, resid
+            self._fail_on_nonfinite(
+                grad_G,
+                name="Chambolle-Pock primal gradient",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
 
             # ── 3. Primal update ─────────────────────────────────────────
             # x_{n+1} = x_n − τ ∇G(x_n) + τ div_per(p_{n+1})
             # (because K^T = −div_per, so −τ K^T p = τ div_per(p))
             div_p  = backward_div_periodic(p_h_new, p_w_new)
+            self._fail_on_nonfinite(
+                div_p,
+                name="Chambolle-Pock divergence state",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
             x_new  = x - tau * grad_G + tau * div_p
             del grad_G, div_p
 
             # ── 4. Positivity projection ─────────────────────────────────
             if nonneg_flag:
                 backend.xp.maximum(x_new, backend.xp.float32(0.0), out=x_new)
+            self._fail_on_nonfinite(
+                x_new,
+                name="Chambolle-Pock iterate",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
 
             # ── 5. Convergence check ─────────────────────────────────────
             if k >= min_iter and (k + 1) % check_every == 0:
@@ -355,16 +454,23 @@ class ChambollePockDeconv(DeconvBase):
 
             # ── 6. Extrapolation: x_bar = x_new + θ (x_new − x) ─────────
             x_bar = x_new + theta * (x_new - x)
+            self._fail_on_nonfinite(
+                x_bar,
+                name="Chambolle-Pock updated extrapolated state x_bar",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
 
             # ── 7. Advance state ─────────────────────────────────────────
             x   = x_new
             p_h = p_h_new
             p_w = p_w_new
+            last_finite = x.copy()
 
         else:
             self._log_no_convergence(num_iter, tol)
 
-        return self._crop_and_return(x)
+        return self._crop_and_return(x, last_finite=last_finite)
 
     # ══════════════════════════════════════════════════════════════════════
     # Dual projection

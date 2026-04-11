@@ -93,29 +93,47 @@
 # SECTION 2.7:  SOLVER BOUNDARY ABSTRACTION
 # ═════════════════════════════════════════════════════════════════════════════
 #
-# All iterative deconvolution solvers share a single boundary abstraction:
+# The package boundary model is solver-family specific. There is no single
+# public boundary-policy API yet. The shared base class defines only the
+# padded-canvas and mask scaffold; the full boundary contract also depends on
+# the solver's regularizer / operator layer.
 #
-#   Extended canvas + operator H via FFT + mask M for data fidelity.
-#
-# CANVAS + MASK LAYER (universal):
+# UNIVERSAL CANVAS + MASK LAYER:
 #   - Work on an extended canvas: original FOV plus a guard band
 #     (sized by padding_scale × PSF size, inherited from DeconvBase).
 #   - y is the observed image embedded into the canvas (padded exterior).
-#   - M is a binary mask on the canvas: 1 inside the original FOV,
-#     0 in the guard band.
 #   - H is convolution with the PSF via circular FFT on the full canvas.
-#   - Data fidelity is computed only on measured pixels:
+#   - For masked solvers, M is a binary mask on the canvas: 1 inside the
+#     original FOV, 0 in the guard band.
 #
-#       min_x  D(M ⊙ (Hx), M ⊙ y)  +  λ R(x)
+# WIENER FAMILY:
+#   - Wiener is NOT an unknown-boundary masked solver.
+#   - It uses padded / tapered circular deconvolution:
+#       * use_mask = False
+#       * apply_taper_on_padding_band = True
+#       * FFT inversion on the padded canvas
+#   - This is a boundary-softening strategy, not masked fidelity on Ω.
 #
-#     where D is the data-fit term (L2, Poisson, etc.) and R is the
-#     regularizer (TV, sparsity, denoiser prior, etc.).
+# ITERATIVE FAMILY (high-level):
+#   - RL, Landweber, FISTA, Chambolle-Pock, ADMM, TVAL3, PnP, RED
+#     all use masked fidelity on the observed support over the padded FFT
+#     canvas:
+#
+#         min_x  D(M ⊙ (Hx), M ⊙ y) + λ R(x)
+#
+#   - The important family split is then in the TV / operator boundary model:
+#       * RL / Landweber / FISTA:
+#           Neumann-family TV or TV-prox behaviour when TV is active.
+#       * Chambolle-Pock / ADMM / TVAL3:
+#           periodic gradient / divergence operators.
+#       * PnP / RED:
+#           inherit ADMM's masked-fidelity and padded-FFT structure but do not
+#           define a separate public TV-boundary contract.
 #
 # PADDING + TAPER:
-#   Used ONLY for single-pass linear deconvolution (e.g., Wiener).
-#   Iterative methods propagate information into the guard band through
-#   the regularizer and PSF coupling — taper is unnecessary and
-#   counterproductive for iterative solvers.
+#   - Used explicitly by Wiener.
+#   - Iterative methods generally rely on the guard band, mask, and prior
+#     coupling rather than padding-band taper.
 #
 # V = HX VARIABLE SPLIT (required for masked ADMM-type solvers):
 #   Introduce v = Hx and solve:
@@ -149,24 +167,26 @@
 #   x-update.  The v=Hx split is the standard workaround that keeps the
 #   x-update diagonalizable in the Fourier domain.
 #
-# BOUNDARY CONDITIONS FOR TV OPERATORS:
+# TV / GRADIENT BOUNDARY CONDITIONS BY SOLVER FAMILY:
 #   Two BC variants in _tv_operators.py serve different algorithmic roles:
 #
-#   - Neumann BC (forward_grad / backward_div):
-#       Zero-flux at boundaries.  Used by proximal TV solvers (Chambolle
-#       dual projection in FISTA/Landweber) and the Dey et al. multiplicative
-#       TV correction in RL.  The Chambolle solver is self-contained — its
-#       internal BC do not need to match the outer algorithm's FFT structure.
+#   - Neumann-family BC:
+#       Used when TV is handled as a standalone proximal or multiplicative
+#       correction step.
+#       * RL            → Dey et al. multiplicative TV correction
+#       * Landweber     → Chambolle proximal TV step
+#       * FISTA (TV)    → Chambolle proximal TV step
 #
-#   - Periodic BC (forward_grad_periodic / backward_div_periodic):
-#       Wrap-around at boundaries.  REQUIRED by any algorithm that
-#       diagonalizes ∇^T∇ in the Fourier domain.  The DFT eigenvalues
-#       4 − 2cos(2πf_y) − 2cos(2πf_x) are derived under periodic BC.
-#       Used by TVAL3 and ADMM x-updates.
+#   - Periodic BC:
+#       Required whenever ∇ or ∇^T∇ is placed directly inside a
+#       Fourier-diagonalized global update.
+#       * Chambolle-Pock → primal-dual coupling uses periodic grad/div
+#       * ADMM           → TV split uses periodic grad/div
+#       * TVAL3          → TV split uses periodic grad/div
 #
-#   This is not a contradiction — it reflects two different mathematical
-#   requirements.  The canvas+mask layer is universal; the TV operator BC
-#   is algorithm-specific.
+#   This is not a contradiction. The package-wide shared layer is:
+#       padded FFT canvas + optional mask M on the observed support.
+#   The regularizer boundary condition is solver-family specific.
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -457,7 +477,7 @@
 #
 #     Store self.use_mask = use_mask for subclass inspection.
 #
-#   Step 10: PSF frequency-domain preparation.
+#   Step 10: PSF frequency-domain preparation (default iterative-family policy).
 #     a) psf_np = psf_preprocess(psf, center_method="com",
 #            remove_negatives="clip", eps=1e-12, enforce_odd_shape=True)
 #     b) psf_np = condition_psf(psf_np, bg_ring_frac=0.15,
@@ -466,6 +486,10 @@
 #     d) ifftshift (move centre to [0,0]).
 #     e) self.PF = _freeze(rfft2(psf_pad))
 #        self.conjPF = _freeze(self.PF.conj())
+#
+#     NOTE: this is a destructive preprocessing policy, not a raw-PSF
+#     pass-through contract. It may alter centroid, support, negativity
+#     pattern, and tail amplitudes before the forward model is built.
 #
 #   Step 11: Precompute H^T M with relative floor clamp.
 #     htm_raw = irfft2(self.conjPF * rfft2(self.mask), s=fshape).astype(xp.float32)
@@ -487,6 +511,13 @@
 #         dtype=xp.float32)
 #     xp.maximum(self.estimated_image, xp.float32(1e-8), out=self.estimated_image)
 #
+#   STATEFUL ITERATE CONTRACT:
+#     self.estimated_image is the persistent object-level iterate state.
+#     Iterative subclasses typically start each new deblur() call from this
+#     stored padded-canvas iterate and overwrite it again on successful
+#     completion.  Wrapper functions do not share this state because they
+#     instantiate a fresh solver object for every call.
+#
 # ── ABSTRACT METHOD ────────────────────────────────────────────────────
 #
 #   @abstractmethod
@@ -500,6 +531,12 @@
 #       """Store final state, crop to (self.h, self.w), move to CPU."""
 #       self.estimated_image = x_k.copy()
 #       return _to_numpy(cropping(x_k, (self.h, self.w)))
+#
+#   FAILURE-STATE CONTRACT:
+#     Numerical failure should preserve a finite self.estimated_image.
+#     This does NOT necessarily mean exact rollback to the pre-call state:
+#     the solver may keep the most recent verified-finite iterate reached
+#     during the failed call.
 #
 #   def _check_convergence(
 #       self,
@@ -776,6 +813,24 @@
 #     Calls super().__init__(..., use_mask=False) — Wiener does not
 #     support masked data fidelity in its classical formulation.
 #
+#   PSF HANDLING:
+#     Wiener inherits the same default preprocessing steps as DeconvBase:
+#       - centre-of-mass centering
+#       - negative clipping
+#       - odd-shape enforcement
+#       - zero-padding to the FFT canvas
+#       - ifftshift before FFT placement
+#
+#     But after calling super().__init__(), Wiener rebuilds the PSF spectrum
+#     from the original PSF with a solver-specific conditioning override:
+#       - iterative-family default:
+#           bg_ring_frac=0.15, taper_outer_frac=0.20, taper_end_frac=0.50
+#       - Wiener override:
+#           bg_ring_frac=0.15, taper_outer_frac=0.90, taper_end_frac=1.0
+#
+#     Therefore Wiener and the iterative-family solvers do not, by default,
+#     use identical conditioned PSFs.
+#
 #   def deblur(
 #       self,
 #       snr: Optional[float] = None,
@@ -815,6 +870,8 @@
 #     - For satellite imagery, typical SNR range: 10–1000 (λ = 0.1–0.001).
 #     - This is a fast baseline — useful for initial inspection and as
 #       an initial estimate for iterative methods.
+#     - WienerDeconv is stateful for precomputed setup and diagnostics, but
+#       repeated deblur() calls do NOT warm-start from the previous output.
 #
 # WRAPPER: wiener_deblur(image, psf, snr=None, ...)
 #
@@ -1133,6 +1190,14 @@
 #     rl = RLUnknownBoundary(image, psf)
 #     result_50  = rl.deblur(num_iter=50)
 #     result_100 = rl.deblur(num_iter=50)   # continues from iteration 50
+#
+# Repeated-call semantics:
+#     - iterative class instances are stateful warm-start solvers
+#     - wrapper functions are stateless cold-start helpers
+#     - WienerDeconv reuses setup/diagnostics across calls but does not
+#       warm-start from a previous output iterate
+#     - on explicit numerical failure, solver state remains finite but may
+#       reflect the last verified finite iterate reached during the failed call
 #
 # Backend control:
 #     from Reconstruction import set_backend

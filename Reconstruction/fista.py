@@ -30,6 +30,23 @@ Key differences from LandweberUnknownBoundary
 
 3. Overridable _prox_step method.  Enables future PnP-FISTA by subclassing.
 
+Boundary model
+--------------
+FISTA uses masked data fidelity on the original support over the padded FFT
+canvas inherited from :class:`~._base.DeconvBase`. The regularizer boundary
+assumption depends on ``reg_mode``:
+
+- ``reg_mode="TV"`` uses Chambolle's standalone TV proximal solver and
+  therefore belongs to the Neumann family.
+- ``reg_mode="L1"`` and ``"L1_wavelet"`` do not introduce a separate TV
+  boundary operator.
+
+Statefulness
+------------
+``FISTADeconv`` is a stateful iterative solver. Repeated object-level
+``deblur()`` calls warm-start from the stored ``estimated_image`` iterate,
+whereas the one-shot wrapper constructs a fresh solver each time.
+
 References
 ----------
 [BT09]  Beck, A. & Teboulle, M. "A fast iterative shrinkage-thresholding
@@ -116,6 +133,17 @@ class FISTADeconv(DeconvBase):
     -----
     ``use_mask=True`` is forced: the masked gradient is essential for the
     unknown-boundary formulation (CLAUDE.md §Solver Architecture).
+
+    The full boundary model is therefore hybrid by design:
+
+    - padded FFT canvas from :class:`DeconvBase`
+    - masked data fidelity on the observed support Ω
+    - circular convolution on the full padded canvas
+    - Neumann-family TV proximal behaviour only when ``reg_mode="TV"``
+
+    Repeated object-level :meth:`deblur` calls warm-start from the stored
+    ``estimated_image`` iterate by default. The wrapper
+    :func:`fista_deblur` is a cold-start convenience function.
 
     The proximal operator for L1_wavelet mode is exact for orthogonal wavelets
     (Haar, Daubechies dbN, Symlets symN) and a good approximation for
@@ -256,18 +284,49 @@ class FISTADeconv(DeconvBase):
         x_km1 = x_k.copy()                   # previous iterate x_{k-1}
         y_k   = x_k.copy()                   # Nesterov extrapolated point
         t_k   = 1.0                           # momentum parameter
+        last_finite = x_k.copy()
 
         for k in range(num_iter):
+            self._fail_on_nonfinite(
+                y_k,
+                name="FISTA extrapolated state y_k",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
 
             # ── 1. Gradient ∇f(y_k) = H^T [ M ⊙ (H y_k − y) ] ─────────
             # Uses rfft2/irfft2 (real FFT, half-spectrum) throughout.
             # Always pass s=full_shape to irfft2 (even/odd ambiguity fix).
             Hy_k  = backend.irfft2(PF * backend.rfft2(y_k), s=s)
+            self._fail_on_nonfinite(
+                Hy_k,
+                name="FISTA forward model Hy_k",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
             resid = M * (Hy_k - y)
+            self._fail_on_nonfinite(
+                resid,
+                name="FISTA residual",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
             grad  = backend.irfft2(cPF * backend.rfft2(resid), s=s)
+            self._fail_on_nonfinite(
+                grad,
+                name="FISTA gradient",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
 
             # ── 2. Gradient step: z = y_k − τ ∇f(y_k) ──────────────────
             z = y_k - tau * grad
+            self._fail_on_nonfinite(
+                z,
+                name="FISTA gradient step state z",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
 
             # ── 3. Proximal step: x_{k+1} = prox_{τλ,g}(z) ─────────────
             x_new = self._prox_step(z, tau * lambda_reg, reg_mode, tv_inner)
@@ -275,6 +334,12 @@ class FISTADeconv(DeconvBase):
             # ── 4. Positivity projection ─────────────────────────────────
             if nonneg_flag:
                 backend.xp.maximum(x_new, backend.xp.float32(0.0), out=x_new)
+            self._fail_on_nonfinite(
+                x_new,
+                name="FISTA iterate",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
 
             # ── 5. Convergence check (before momentum update) ────────────
             if k >= min_iter and (k + 1) % check_every == 0:
@@ -291,6 +356,12 @@ class FISTADeconv(DeconvBase):
             t_new    = 0.5 * (1.0 + math.sqrt(1.0 + 4.0 * t_k * t_k))
             momentum = (t_k - 1.0) / t_new
             y_new    = x_new + backend.xp.float32(momentum) * (x_new - x_k)
+            self._fail_on_nonfinite(
+                y_new,
+                name="FISTA momentum state y_new",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
 
             # ── 7. O'Donoghue-Candès gradient restart [OC15 §3.1] ───────
             # Restart when consecutive iterate steps are opposed (angle > 90°):
@@ -312,11 +383,12 @@ class FISTADeconv(DeconvBase):
             x_k   = x_new
             y_k   = y_new
             t_k   = t_new
+            last_finite = x_k.copy()
 
         else:
             self._log_no_convergence(num_iter, tol)
 
-        return self._crop_and_return(x_k)
+        return self._crop_and_return(x_k, last_finite=last_finite)
 
     # ══════════════════════════════════════════════════════════════════════
     # Proximal interface (overridable for PnP-FISTA extension)
@@ -371,8 +443,9 @@ class FISTADeconv(DeconvBase):
 
         Solves:  prox_{γ TV}(z) = argmin_u (1/2)||u − z||² + γ TV(u)
 
-        Uses Neumann BC (correct for a standalone proximal sub-problem;
-        see CLAUDE.md pitfall #8 for the BC discussion).
+        Uses the Neumann-family TV boundary convention (correct for a
+        standalone proximal sub-problem; see CLAUDE.md pitfall #8 for the BC
+        discussion).
 
         Parameters
         ----------

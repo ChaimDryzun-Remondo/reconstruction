@@ -52,6 +52,7 @@ def _make_fake_cupy_module() -> types.ModuleType:
     cp.isfinite = np.isfinite
     cp.sum = np.sum
     cp.median = np.median
+    cp.errstate = np.errstate
     cp.pi = np.pi
     cp.float32 = np.float32
     cp.float64 = np.float64

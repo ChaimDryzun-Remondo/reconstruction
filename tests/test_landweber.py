@@ -10,8 +10,9 @@ Checks:
   5. Preconditioned vs unpreconditioned: produce different results.
   6. Wrapper: landweber_deblur_unknown_boundary splits kwargs correctly.
   7. Regression: output matches docs/reference/Landweber_Unknown_Boundary.py
-     within atol=1e-5.  Both new and reference are constructed with
-     htm_floor_frac=0.0 for identical HTM values.
+     within atol=1e-5 only on finite comparison cases.
+  8. Numerical-failure contract: instability must raise and must not poison
+     persistent solver state.
 """
 from __future__ import annotations
 
@@ -80,6 +81,10 @@ class TestLandweberInit:
     def test_lipschitz_positive(self, lw):
         """Lipschitz constant must be strictly positive."""
         assert lw._lipschitz > 0.0
+
+    def test_use_mask_true_by_default(self, lw):
+        """Landweber uses masked fidelity on the observed support by default."""
+        assert lw.use_mask is True
 
     def test_is_deconvbase_subclass(self):
         """LandweberUnknownBoundary is a subclass of DeconvBase."""
@@ -208,6 +213,22 @@ class TestLandweberFISTA:
             "estimated_image should be updated by deblur()"
         )
 
+    def test_repeated_object_call_warm_starts_and_differs_from_wrapper_cold_start(
+        self, blurred_image, gaussian_psf
+    ):
+        solver = LandweberUnknownBoundary(image=blurred_image, psf=gaussian_psf)
+        solver.deblur(num_iter=5, lambda_tv=0.0, tol=0.0)
+
+        warm_result = solver.deblur(num_iter=1, lambda_tv=0.0, tol=0.0)
+        cold_result = landweber_deblur_unknown_boundary(
+            blurred_image, gaussian_psf, num_iter=1, lambda_tv=0.0, tol=0.0,
+        )
+
+        assert not np.allclose(warm_result, cold_result), (
+            "Repeated class calls should warm-start from the stored iterate, "
+            "unlike cold-start wrapper calls."
+        )
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 5. Preconditioned vs unpreconditioned
@@ -245,6 +266,26 @@ class TestLandweberPreconditioned:
         assert not np.allclose(r_no_tv, r_tv), (
             "TV regularisation should change the output"
         )
+
+    def test_tv_active_uses_chambolle_tv_prox(
+        self, blurred_image, gaussian_psf, monkeypatch
+    ):
+        import Reconstruction.landweber_unknown_boundary as lw_mod
+
+        calls: list[tuple[float, int, tuple[int, int]]] = []
+        original = lw_mod.prox_tv_chambolle
+
+        def spy_prox(x_half, gamma, n_inner=50):
+            calls.append((float(gamma), int(n_inner), tuple(x_half.shape)))
+            return original(x_half, gamma, n_inner=n_inner)
+
+        monkeypatch.setattr(lw_mod, "prox_tv_chambolle", spy_prox)
+
+        LandweberUnknownBoundary(image=blurred_image, psf=gaussian_psf).deblur(
+            num_iter=1, lambda_tv=1e-3, tol=0.0, min_iter=1,
+        )
+
+        assert calls, "Landweber TV path should call prox_tv_chambolle"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -324,7 +365,7 @@ def _load_reference_module():
 class TestLandweberRegression:
     """
     Regression: new LandweberUnknownBoundary must match the reference
-    within atol=1e-5 for 30 iterations.
+    within atol=1e-5 on finite comparison cases.
 
     Both new and reference constructors accept htm_floor_frac; passing
     htm_floor_frac=0.0 to both ensures they compute identical HTM arrays
@@ -352,6 +393,8 @@ class TestLandweberRegression:
             num_iter=30, lambda_tv=0.0, tol=0.0,
         )
 
+        assert np.isfinite(ref_result).all()
+        assert np.isfinite(new_result).all()
         np.testing.assert_allclose(
             new_result, ref_result, atol=1e-5,
             err_msg="No-TV regression failed: new != reference within atol=1e-5",
@@ -373,6 +416,8 @@ class TestLandweberRegression:
             num_iter=30, lambda_tv=0.001, tol=0.0,
         )
 
+        assert np.isfinite(ref_result).all()
+        assert np.isfinite(new_result).all()
         np.testing.assert_allclose(
             new_result, ref_result, atol=1e-5,
             err_msg="TV regression failed: new != reference within atol=1e-5",
@@ -395,6 +440,8 @@ class TestLandweberRegression:
             num_iter=30, lambda_tv=0.001, tol=0.0, precondition=False,
         )
 
+        assert np.isfinite(ref_result).all()
+        assert np.isfinite(new_result).all()
         np.testing.assert_allclose(
             new_result, ref_result, atol=1e-5,
             err_msg=(
@@ -402,3 +449,72 @@ class TestLandweberRegression:
                 "new != reference within atol=1e-5"
             ),
         )
+
+
+class TestLandweberNumericalFailureContract:
+    """Non-finite iterates should raise and leave persistent state untouched."""
+
+    def test_induced_nonfinite_prox_output_raises_floating_point_error(
+        self, blurred_image, gaussian_psf, monkeypatch
+    ):
+        import Reconstruction.landweber_unknown_boundary as lw_mod
+
+        solver = LandweberUnknownBoundary(image=blurred_image, psf=gaussian_psf)
+
+        def _nan_prox(x_half, gamma, n_inner=50):
+            return backend.xp.full_like(x_half, backend.xp.nan)
+
+        monkeypatch.setattr(lw_mod, "prox_tv_chambolle", _nan_prox)
+
+        with pytest.raises(FloatingPointError):
+            solver.deblur(
+                num_iter=1, lambda_tv=1e-3, tol=0.0, min_iter=0, check_every=1,
+            )
+
+    def test_failed_run_does_not_overwrite_estimated_image_with_nonfinite_values(
+        self, blurred_image, gaussian_psf, monkeypatch
+    ):
+        import Reconstruction.landweber_unknown_boundary as lw_mod
+
+        solver = LandweberUnknownBoundary(image=blurred_image, psf=gaussian_psf)
+        initial = np.array(solver.estimated_image, copy=True)
+
+        def _nan_prox(x_half, gamma, n_inner=50):
+            return backend.xp.full_like(x_half, backend.xp.nan)
+
+        monkeypatch.setattr(lw_mod, "prox_tv_chambolle", _nan_prox)
+
+        with pytest.raises(FloatingPointError):
+            solver.deblur(
+                num_iter=1, lambda_tv=1e-3, tol=0.0, min_iter=0, check_every=1,
+            )
+
+        final_state = np.array(solver.estimated_image)
+        assert np.isfinite(final_state).all()
+        np.testing.assert_allclose(final_state, initial, atol=0.0, rtol=0.0)
+
+    def test_late_failure_may_preserve_last_finite_iterate_from_failed_call(
+        self, blurred_image, gaussian_psf, monkeypatch
+    ):
+        import Reconstruction.landweber_unknown_boundary as lw_mod
+
+        solver = LandweberUnknownBoundary(image=blurred_image, psf=gaussian_psf)
+        initial = np.array(solver.estimated_image, copy=True)
+        calls = {"count": 0}
+
+        def _staged_prox(x_half, gamma, n_inner=50):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return x_half.copy()
+            return backend.xp.full_like(x_half, backend.xp.nan)
+
+        monkeypatch.setattr(lw_mod, "prox_tv_chambolle", _staged_prox)
+
+        with pytest.raises(FloatingPointError):
+            solver.deblur(
+                num_iter=2, lambda_tv=1e-3, tol=0.0, min_iter=99, check_every=1,
+            )
+
+        final_state = np.array(solver.estimated_image)
+        assert np.isfinite(final_state).all()
+        assert not np.allclose(final_state, initial)

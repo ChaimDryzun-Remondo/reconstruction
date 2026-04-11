@@ -256,6 +256,11 @@ class TestUseMask:
         solver = PnPADMM(blurred, small_psf, rho_v=1.0, rho_z=1.0)
         assert solver.mask.shape == solver.full_shape
 
+    def test_use_mask_true_by_default(self, blurred, small_psf):
+        """PnP inherits ADMM masked fidelity on the observed support."""
+        solver = PnPADMM(blurred, small_psf, rho_v=1.0, rho_z=1.0)
+        assert solver.use_mask is True
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 6. _denoise method
@@ -312,6 +317,79 @@ class TestDenoise:
         arr = backend.xp.array(np.clip(blurred, 0, 1), dtype=backend.xp.float64)
         result = solver._denoise(arr, sigma=0.03)
         assert result.shape == arr.shape
+
+
+@pytest.mark.parametrize(
+    ("bad_value", "label"),
+    [
+        (np.nan, "NaN"),
+        (np.inf, "Inf"),
+    ],
+)
+class TestDenoiserNumericalFailureContract:
+
+    def test_nonfinite_denoiser_output_raises_immediately(
+        self, blurred, small_psf, monkeypatch, bad_value, label
+    ):
+        solver = PnPADMM(blurred, small_psf, rho_v=1.0, rho_z=1.0)
+        call_count = {"n": 0}
+
+        def _bad_denoise(image, sigma):
+            call_count["n"] += 1
+            return backend.xp.full_like(image, bad_value)
+
+        monkeypatch.setattr(solver, "_denoise", _bad_denoise)
+
+        with pytest.raises(FloatingPointError, match="denoiser output"):
+            solver.deblur(num_iter=5, lambda_tv=0.01, min_iter=999)
+
+        assert call_count["n"] == 1, (
+            f"PnP should fail immediately on {label} denoiser output."
+        )
+
+    def test_failed_run_does_not_overwrite_estimated_image_with_nonfinite_values(
+        self, blurred, small_psf, monkeypatch, bad_value, label
+    ):
+        solver = PnPADMM(blurred, small_psf, rho_v=1.0, rho_z=1.0)
+        initial = np.array(solver.estimated_image, copy=True)
+
+        def _bad_denoise(image, sigma):
+            return backend.xp.full_like(image, bad_value)
+
+        monkeypatch.setattr(solver, "_denoise", _bad_denoise)
+
+        with pytest.raises(FloatingPointError, match="denoiser output"):
+            solver.deblur(num_iter=3, lambda_tv=0.01, min_iter=999)
+
+        final_state = np.array(solver.estimated_image)
+        assert np.isfinite(final_state).all(), (
+            f"Persistent state poisoned after {label} denoiser failure."
+        )
+        np.testing.assert_allclose(final_state, initial, atol=0.0, rtol=0.0)
+
+    def test_late_failure_may_preserve_last_finite_iterate_from_failed_call(
+        self, blurred, small_psf, monkeypatch, bad_value, label
+    ):
+        solver = PnPADMM(blurred, small_psf, rho_v=1.0, rho_z=1.0)
+        initial = np.array(solver.estimated_image, copy=True)
+        calls = {"count": 0}
+
+        def _staged_denoise(image, sigma):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return backend.xp.clip(image * 0.97 + 0.01, 0.0, 1.0)
+            return backend.xp.full_like(image, bad_value)
+
+        monkeypatch.setattr(solver, "_denoise", _staged_denoise)
+
+        with pytest.raises(FloatingPointError, match="denoiser output"):
+            solver.deblur(num_iter=2, lambda_tv=0.01, tol=0.0, min_iter=999)
+
+        final_state = np.array(solver.estimated_image)
+        assert np.isfinite(final_state).all(), (
+            f"Persistent state poisoned after staged {label} denoiser failure."
+        )
+        assert not np.allclose(final_state, initial)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -373,13 +451,16 @@ class TestSigmaDerivation:
 
 class TestSigmaScaleEffect:
 
-    def test_higher_sigma_scale_smoother(self, blurred, small_psf):
+    def test_higher_sigma_scale_changes_solution(self, blurred, small_psf):
         """
-        Higher sigma_scale → stronger BM3D → smoother output.
+        sigma_scale materially changes the PnP solution.
 
-        Smoothness measured via std-dev of horizontal finite differences.
-        Uses an extreme sigma_scale ratio and sufficient iterations so the
-        ADMM dynamics have time to converge to a clearly smoother solution.
+        The sigma formula itself is already covered by TestSigmaDerivation.
+        What we want here is a stable behavioural check that the denoiser
+        strength knob is not ignored.  With BM3D inside an ADMM loop,
+        stronger denoising is not guaranteed to be monotonically smoother
+        under any single image statistic, so compare the reconstructions
+        directly instead of asserting one fixed smoothness ordering.
         """
         kw = dict(rho_v=1.0, rho_z=1.0, nonneg=True)
         result_low = PnPADMM(
@@ -389,11 +470,10 @@ class TestSigmaScaleEffect:
             blurred, small_psf, sigma_scale=5.0, **kw
         ).deblur(num_iter=20, lambda_tv=0.01)
 
-        std_low  = float(np.std(np.diff(result_low,  axis=1)))
-        std_high = float(np.std(np.diff(result_high, axis=1)))
-        assert std_high < std_low, (
-            f"Higher sigma_scale should produce smoother output: "
-            f"std_low={std_low:.4f}, std_high={std_high:.4f}"
+        max_diff = float(np.max(np.abs(result_high - result_low)))
+        assert max_diff > 1e-3, (
+            "Changing sigma_scale should materially change the PnP output, "
+            f"but max difference was only {max_diff:.3e}"
         )
 
 
@@ -577,6 +657,23 @@ class TestCostHistory:
         solver.deblur(num_iter=3, lambda_tv=0.01)
         assert solver.cost_history is not solver.cost_history
 
+    def test_cost_history_resets_between_deblur_calls(self, blurred, small_psf, monkeypatch):
+        """Each deblur() call should replace cost_history rather than append."""
+        def deterministic_denoise(self, image, sigma):
+            return backend.xp.clip(image * 0.97 + 0.01, 0.0, 1.0)
+
+        monkeypatch.setattr(PnPADMM, "_denoise", deterministic_denoise)
+
+        solver = PnPADMM(blurred, small_psf, rho_v=1.0, rho_z=1.0)
+        solver.deblur(num_iter=4, lambda_tv=0.01, tol=0.0, min_iter=999)
+        first_len = len(solver.cost_history)
+
+        solver.deblur(num_iter=1, lambda_tv=0.01, tol=0.0, min_iter=999)
+        second_len = len(solver.cost_history)
+
+        assert first_len == 5
+        assert second_len == 2
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 13. Wrapper equivalence
@@ -584,14 +681,20 @@ class TestCostHistory:
 
 class TestWrapper:
 
-    def test_pnp_admm_deblur_matches_class(self, blurred, small_psf):
+    def test_pnp_admm_deblur_matches_class(self, blurred, small_psf, monkeypatch):
         """
-        pnp_admm_deblur output matches direct class usage to float32 tolerance.
+        pnp_admm_deblur matches direct class usage when the denoiser is
+        deterministic.
 
-        BM3D may exhibit sub-ULP float32 differences between two independent
-        calls (internal parallelism, FFTW plan caching).  Use allclose with
-        a tight tolerance rather than exact equality.
+        BM3D-backed PnP runs are not bit-stable across independent solves, so
+        wrapper equivalence should be tested with a deterministic stand-in
+        denoiser. This isolates argument routing and call-path correctness.
         """
+        def deterministic_denoise(self, image, sigma):
+            return backend.xp.clip(image * 0.97 + 0.01, 0.0, 1.0)
+
+        monkeypatch.setattr(PnPADMM, "_denoise", deterministic_denoise)
+
         common_kw = dict(rho_v=1.0, rho_z=1.0, nonneg=True)
         result_cls = PnPADMM(blurred, small_psf, **common_kw).deblur(
             num_iter=3, lambda_tv=0.01
@@ -599,7 +702,7 @@ class TestWrapper:
         result_fn = pnp_admm_deblur(
             blurred, small_psf, iters=3, lambda_tv=0.01, **common_kw
         )
-        np.testing.assert_allclose(result_cls, result_fn, atol=1e-5, rtol=1e-5)
+        np.testing.assert_allclose(result_cls, result_fn, atol=1e-10, rtol=1e-10)
 
     def test_wrapper_kwarg_split(self, blurred, small_psf):
         """pnp_admm_deblur correctly routes init vs deblur kwargs."""
@@ -613,6 +716,31 @@ class TestWrapper:
         )
         assert isinstance(result, np.ndarray)
         assert np.isfinite(result).all()
+
+    def test_repeated_object_call_warm_starts_and_differs_from_wrapper_cold_start(
+        self, blurred, small_psf, monkeypatch
+    ):
+        def deterministic_denoise(self, image, sigma):
+            return backend.xp.clip(image * 0.97 + 0.01, 0.0, 1.0)
+
+        monkeypatch.setattr(PnPADMM, "_denoise", deterministic_denoise)
+
+        solver = PnPADMM(blurred, small_psf, rho_v=1.0, rho_z=1.0)
+        solver.deblur(num_iter=5, lambda_tv=0.01, tol=0.0, min_iter=999)
+
+        warm_result = solver.deblur(
+            num_iter=1, lambda_tv=0.01, tol=0.0, min_iter=999
+        )
+        cold_result = pnp_admm_deblur(
+            blurred, small_psf,
+            iters=1, lambda_tv=0.01, tol=0.0, min_iter=999,
+            rho_v=1.0, rho_z=1.0,
+        )
+
+        assert not np.allclose(warm_result, cold_result), (
+            "Repeated class calls should warm-start from the stored iterate, "
+            "unlike cold-start wrapper calls."
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

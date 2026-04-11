@@ -247,6 +247,43 @@ class TestCrossAlgorithmConsistency:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Working-domain smoke checks
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestWorkingDomainContract:
+
+    def test_root_classes_store_odd_cropped_working_domain_shape(self, integration_psf):
+        """Root-namespace classes expose odd-cropped grayscale working-domain size."""
+        base = _blur(_test_image(52, 50), integration_psf)
+        rgb_observed = np.stack([base, 0.8 * base + 0.05, 0.5 * base + 0.1], axis=-1)
+
+        wiener = Reconstruction.WienerDeconv(rgb_observed, integration_psf)
+        admm = Reconstruction.ADMMDeconv(rgb_observed, integration_psf)
+
+        assert (wiener.h, wiener.w) == (51, 49)
+        assert (admm.h, admm.w) == (51, 49)
+        assert wiener.gray.shape == (51, 49)
+
+    def test_root_wrappers_return_grayscale_working_domain_arrays(self, integration_psf):
+        """Representative root wrappers return 2-D working-domain grayscale arrays."""
+        base = _blur(_test_image(52, 50), integration_psf)
+        rgb_observed = np.stack([base, 0.8 * base + 0.05, 0.5 * base + 0.1], axis=-1)
+
+        wiener_out = Reconstruction.wiener_deblur(rgb_observed, integration_psf, alpha=0.01)
+        admm_out = Reconstruction.admm_deblur(
+            rgb_observed, integration_psf, iters=3, lambda_tv=0.01
+        )
+
+        for name, result in (("Wiener", wiener_out), ("ADMM", admm_out)):
+            assert isinstance(result, np.ndarray), f"{name}: expected numpy output"
+            assert result.ndim == 2, f"{name}: output should be grayscale"
+            assert result.shape == (51, 49), (
+                f"{name}: expected odd-cropped working-domain shape (51, 49), got {result.shape}"
+            )
+            assert np.isfinite(result).all(), f"{name}: output contains non-finite values"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Package-level instantiation via root namespace
 # ══════════════════════════════════════════════════════════════════════════════
 

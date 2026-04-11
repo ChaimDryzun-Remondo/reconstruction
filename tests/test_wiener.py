@@ -26,6 +26,8 @@ import pytest
 # ─────────────────────────────────────────────────────────────────────────────
 # Load module under test
 # ─────────────────────────────────────────────────────────────────────────────
+import Reconstruction._base as base_module
+import Reconstruction.wiener as wiener_module
 from Reconstruction.wiener import WienerDeconv, wiener_deblur, _LAPL_NP
 
 
@@ -189,6 +191,124 @@ class TestWienerDeconvConstruction:
         w2 = WienerDeconv(blurred_clean, psf, normalize_image=False)
         assert w2 is not None
 
+    def test_normalize_image_is_compatibility_only_for_internal_gray(self, blurred_clean, psf):
+        """normalize_image=True/False currently produce the same working domain."""
+        w_true = WienerDeconv(blurred_clean, psf, normalize_image=True)
+        w_false = WienerDeconv(blurred_clean, psf, normalize_image=False)
+        np.testing.assert_allclose(w_true.gray, w_false.gray, atol=1e-7)
+
+    def test_normalize_image_is_compatibility_only_for_output(self, blurred_clean, psf):
+        """normalize_image flag must not change Wiener output for fixed alpha."""
+        out_true = WienerDeconv(
+            blurred_clean, psf, normalize_image=True
+        ).deblur(alpha=0.01)
+        out_false = WienerDeconv(
+            blurred_clean, psf, normalize_image=False
+        ).deblur(alpha=0.01)
+        np.testing.assert_allclose(out_true, out_false, atol=1e-7)
+
+
+class TestWienerPSFContract:
+
+    def test_wiener_uses_distinct_conditioning_preset(self, blurred_clean, psf, monkeypatch):
+        captured: dict[str, dict] = {}
+
+        def fake_base_condition(*args, **kwargs):
+            captured["base_condition"] = kwargs
+            psf_in = kwargs.get("psf", args[0] if args else None)
+            return np.asarray(psf_in, dtype=np.float64)
+
+        def fake_wiener_condition(*args, **kwargs):
+            captured["wiener_condition"] = kwargs
+            psf_in = kwargs.get("psf", args[0] if args else None)
+            return np.asarray(psf_in, dtype=np.float64)
+
+        monkeypatch.setattr(base_module, "condition_psf", fake_base_condition)
+        monkeypatch.setattr(wiener_module, "condition_psf", fake_wiener_condition)
+
+        WienerDeconv(blurred_clean, psf)
+
+        assert captured["base_condition"]["bg_ring_frac"] == 0.15
+        assert captured["base_condition"]["taper_outer_frac"] == 0.20
+        assert captured["base_condition"]["taper_end_frac"] == 0.50
+        assert captured["wiener_condition"]["bg_ring_frac"] == 0.15
+        assert captured["wiener_condition"]["taper_outer_frac"] == 0.90
+        assert captured["wiener_condition"]["taper_end_frac"] == 1.0
+
+    def test_wiener_psf_zero_padding_and_ifftshift_are_explicit(self, blurred_clean, psf, monkeypatch):
+        original_padding = wiener_module.padding
+        captured: dict[str, object] = {}
+
+        def fake_padding(image, full_size, Type, apply_taper=False):
+            if Type == "Zero" and image.shape == psf.shape:
+                captured["psf_padding_call"] = {
+                    "full_size": full_size,
+                    "Type": Type,
+                    "apply_taper": apply_taper,
+                }
+                return np.full(full_size, 11.0, dtype=np.float32)
+            return original_padding(
+                image=image,
+                full_size=full_size,
+                Type=Type,
+                apply_taper=apply_taper,
+            )
+
+        def fake_ifftshift(arr):
+            if np.all(arr == 11.0):
+                captured["wiener_ifftshift_seen"] = True
+            return np.fft.ifftshift(arr)
+
+        monkeypatch.setattr(wiener_module, "padding", fake_padding)
+        monkeypatch.setattr(wiener_module.backend, "ifftshift", fake_ifftshift)
+
+        obj = WienerDeconv(blurred_clean, psf)
+
+        assert captured["psf_padding_call"] == {
+            "full_size": obj.full_shape,
+            "Type": "Zero",
+            "apply_taper": False,
+        }
+        assert captured.get("wiener_ifftshift_seen") is True
+
+
+class TestWienerBoundaryContract:
+
+    def test_wiener_image_padding_enables_taper_on_padding_band(
+        self, blurred_clean, psf, monkeypatch
+    ):
+        captured: dict[str, object] = {}
+        original_padding = base_module.padding
+
+        def spy_padding(image, full_size, Type, apply_taper=False):
+            if Type == "Reflect" and tuple(image.shape) == blurred_clean.shape:
+                captured["image_padding_call"] = {
+                    "full_size": full_size,
+                    "Type": Type,
+                    "apply_taper": apply_taper,
+                }
+            return original_padding(
+                image=image,
+                full_size=full_size,
+                Type=Type,
+                apply_taper=apply_taper,
+            )
+
+        monkeypatch.setattr(base_module, "padding", spy_padding)
+
+        obj = WienerDeconv(blurred_clean, psf, paddingMode="Reflect")
+
+        assert captured["image_padding_call"] == {
+            "full_size": obj.full_shape,
+            "Type": "Reflect",
+            "apply_taper": True,
+        }
+
+    def test_wiener_no_mask_means_all_ones_mask(self, blurred_clean, psf):
+        obj = WienerDeconv(blurred_clean, psf)
+        assert obj.use_mask is False
+        assert np.all(np.asarray(obj.mask) == 1.0)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. deblur() output tests
@@ -250,6 +370,19 @@ class TestDeblurOutput:
         out_large = w.deblur(alpha=1.0)
         assert float(out_large.var()) < float(out_small.var())
 
+    def test_repeated_calls_do_not_warm_start_from_estimated_image(self, blurred_clean, psf):
+        """Wiener is stateful for setup/diagnostics, not for iterate warm-starting."""
+        w = WienerDeconv(blurred_clean, psf)
+        out1 = w.deblur(alpha=0.005)
+        w.estimated_image[...] = np.float32(0.123)
+        out2 = w.deblur(alpha=0.005)
+        np.testing.assert_allclose(out1, out2, atol=1e-7)
+
+    def test_repeated_wrapper_calls_are_cold_start_equivalent(self, blurred_clean, psf):
+        out1 = wiener_deblur(blurred_clean, psf, alpha=0.005)
+        out2 = wiener_deblur(blurred_clean, psf, alpha=0.005)
+        np.testing.assert_allclose(out1, out2, atol=1e-7)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Auto-alpha and property tests
@@ -301,6 +434,13 @@ class TestAutoAlphaAndProperties:
         w2 = WienerDeconv(noisy_blurred, psf, mode="Tikhonov", gamma=2.0)
         w1.deblur(); w2.deblur()
         assert w2.last_alpha == pytest.approx(2.0 * w1.last_alpha, rel=1e-4)
+
+    def test_last_alpha_is_overwritten_by_later_calls(self, blurred_clean, psf):
+        w = WienerDeconv(blurred_clean, psf)
+        w.deblur(alpha=0.01)
+        assert w.last_alpha == pytest.approx(0.01)
+        w.deblur(alpha=0.02)
+        assert w.last_alpha == pytest.approx(0.02)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

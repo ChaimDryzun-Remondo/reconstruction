@@ -16,6 +16,7 @@ Covers:
   - Wrapper chambolle_pock_deblur matches class-based call
   - Root namespace accessibility (ChambollePockDeconv, chambolle_pock_deblur)
   - Inheritance from DeconvBase
+  - Numerical-failure contract for non-finite iterates
 """
 from __future__ import annotations
 
@@ -407,6 +408,16 @@ class TestDualProject:
         np.testing.assert_allclose(backend._to_numpy(ph_out), expected, atol=1e-6)
 
 
+class _NaNDualProjectCP(ChambollePockDeconv):
+    """Subclass that injects non-finite dual variables into the iteration."""
+
+    def _dual_project(self, p_h, p_w, lam):
+        return (
+            backend.xp.full_like(p_h, backend.xp.nan),
+            backend.xp.full_like(p_w, backend.xp.nan),
+        )
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 9. Step size validity
 # ══════════════════════════════════════════════════════════════════════════════
@@ -453,6 +464,36 @@ class TestMask:
         result = ChambollePockDeconv(blurred, small_psf).deblur(num_iter=5)
         h, w = result.shape
         assert h <= test_image.shape[0] and w <= test_image.shape[1]
+
+
+class TestBoundaryContract:
+
+    def test_uses_periodic_gradient_and_divergence_operators(
+        self, blurred, small_psf, monkeypatch
+    ):
+        import Reconstruction.chambolle_pock as cp_mod
+
+        calls = {"grad": 0, "div": 0}
+        original_grad = cp_mod.forward_grad_periodic
+        original_div = cp_mod.backward_div_periodic
+
+        def spy_grad(x):
+            calls["grad"] += 1
+            return original_grad(x)
+
+        def spy_div(p_h, p_w):
+            calls["div"] += 1
+            return original_div(p_h, p_w)
+
+        monkeypatch.setattr(cp_mod, "forward_grad_periodic", spy_grad)
+        monkeypatch.setattr(cp_mod, "backward_div_periodic", spy_div)
+
+        ChambollePockDeconv(blurred, small_psf).deblur(
+            num_iter=1, lambda_tv=1e-3, tol=0.0, min_iter=1,
+        )
+
+        assert calls["grad"] > 0
+        assert calls["div"] > 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -513,6 +554,22 @@ class TestConvergence:
         assert isinstance(result, np.ndarray)
         assert np.isfinite(result).all()
 
+    def test_repeated_object_call_warm_starts_and_differs_from_wrapper_cold_start(
+        self, blurred, small_psf
+    ):
+        solver = ChambollePockDeconv(blurred, small_psf)
+        solver.deblur(num_iter=5, lambda_tv=0.01, tol=0.0)
+
+        warm_result = solver.deblur(num_iter=1, lambda_tv=0.01, tol=0.0)
+        cold_result = chambolle_pock_deblur(
+            blurred, small_psf, iters=1, lambda_tv=0.01, tol=0.0,
+        )
+
+        assert not np.allclose(warm_result, cold_result), (
+            "Repeated class calls should warm-start from the stored iterate, "
+            "unlike cold-start wrapper calls."
+        )
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 12b. Validation / edge cases
@@ -539,6 +596,60 @@ class TestValidation:
     def test_sigma_dual_nonpositive_raises(self, blurred, small_psf):
         with pytest.raises(ValueError, match="sigma_dual"):
             ChambollePockDeconv(blurred, small_psf, sigma_dual=0.0)
+
+
+class TestNumericalFailureContract:
+
+    def test_nonfinite_dual_projection_raises_floating_point_error(
+        self, blurred, small_psf
+    ):
+        solver = _NaNDualProjectCP(blurred, small_psf)
+        with pytest.raises(FloatingPointError):
+            solver.deblur(
+                num_iter=1, lambda_tv=0.01, tol=0.0, min_iter=0, check_every=1
+            )
+
+    def test_failed_run_does_not_overwrite_estimated_image_with_nonfinite_values(
+        self, blurred, small_psf
+    ):
+        solver = _NaNDualProjectCP(blurred, small_psf)
+        initial = np.array(solver.estimated_image, copy=True)
+
+        with pytest.raises(FloatingPointError):
+            solver.deblur(
+                num_iter=1, lambda_tv=0.01, tol=0.0, min_iter=0, check_every=1
+            )
+
+        final_state = np.array(solver.estimated_image)
+        assert np.isfinite(final_state).all()
+        np.testing.assert_allclose(final_state, initial, atol=0.0, rtol=0.0)
+
+    def test_late_failure_may_preserve_last_finite_iterate_from_failed_call(
+        self, blurred, small_psf, monkeypatch
+    ):
+        solver = ChambollePockDeconv(blurred, small_psf)
+        initial = np.array(solver.estimated_image, copy=True)
+        calls = {"count": 0}
+
+        def _staged_project(p_h, p_w, lam):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return p_h.copy(), p_w.copy()
+            return (
+                backend.xp.full_like(p_h, backend.xp.nan),
+                backend.xp.full_like(p_w, backend.xp.nan),
+            )
+
+        monkeypatch.setattr(solver, "_dual_project", _staged_project)
+
+        with pytest.raises(FloatingPointError):
+            solver.deblur(
+                num_iter=2, lambda_tv=0.01, tol=0.0, min_iter=99, check_every=1
+            )
+
+        final_state = np.array(solver.estimated_image)
+        assert np.isfinite(final_state).all()
+        assert not np.allclose(final_state, initial)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

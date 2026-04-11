@@ -266,6 +266,18 @@ class TestCostHistory:
         hist2 = solver.cost_history
         assert hist1 is not hist2
 
+    def test_cost_history_resets_between_deblur_calls(self, blurred, small_psf):
+        """Each deblur() call should replace cost_history rather than append."""
+        solver = TVAL3Deconv(blurred, small_psf, mu=16.0, adaptive_tv=False)
+        solver.deblur(num_iter=4, lambda_tv=0.01, tol=0.0, min_iter=999)
+        first_len = len(solver.cost_history)
+
+        solver.deblur(num_iter=1, lambda_tv=0.01, tol=0.0, min_iter=999)
+        second_len = len(solver.cost_history)
+
+        assert first_len == 5
+        assert second_len == 2
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 6. Adaptive rho_v
@@ -303,6 +315,26 @@ class TestAdaptiveMu:
         solver.deblur(num_iter=50, lambda_tv=0.01)
         assert mu_min <= solver.last_mu <= mu_max, (
             f"last_mu={solver.last_mu:.4f} outside [{mu_min}, {mu_max}]"
+        )
+
+    def test_repeated_object_call_warm_starts_and_differs_from_wrapper_cold_start(
+        self, blurred, small_psf
+    ):
+        solver = TVAL3Deconv(blurred, small_psf, mu=16.0, adaptive_tv=False)
+        solver.deblur(num_iter=5, lambda_tv=0.01, tol=0.0, min_iter=999)
+
+        warm_result = solver.deblur(
+            num_iter=1, lambda_tv=0.01, tol=0.0, min_iter=999
+        )
+        cold_result = tval3_deblur(
+            blurred, small_psf,
+            iters=1, lambda_tv=0.01, tol=0.0, min_iter=999,
+            mu=16.0, adaptive_tv=False,
+        )
+
+        assert not np.allclose(warm_result, cold_result), (
+            "Repeated class calls should warm-start from the stored iterate, "
+            "unlike cold-start wrapper calls."
         )
 
 
@@ -433,6 +465,41 @@ class TestUseMask:
         ).deblur(num_iter=10, lambda_tv=0.01)
         assert np.isfinite(result).all()
 
+    def test_use_mask_true_by_default(self, blurred, small_psf):
+        """TVAL3 uses masked fidelity on the observed support by default."""
+        solver = TVAL3Deconv(blurred, small_psf, mu=16.0, adaptive_tv=False)
+        assert solver.use_mask is True
+
+
+class TestBoundaryContract:
+
+    def test_uses_periodic_gradient_and_divergence_operators(
+        self, blurred, small_psf, monkeypatch
+    ):
+        import Reconstruction.tval3 as tval3_mod
+
+        calls = {"grad": 0, "div": 0}
+        original_grad = tval3_mod.forward_grad_periodic
+        original_div = tval3_mod.backward_div_periodic
+
+        def spy_grad(x):
+            calls["grad"] += 1
+            return original_grad(x)
+
+        def spy_div(p_h, p_w):
+            calls["div"] += 1
+            return original_div(p_h, p_w)
+
+        monkeypatch.setattr(tval3_mod, "forward_grad_periodic", spy_grad)
+        monkeypatch.setattr(tval3_mod, "backward_div_periodic", spy_div)
+
+        TVAL3Deconv(blurred, small_psf, mu=16.0, adaptive_tv=False).deblur(
+            num_iter=1, lambda_tv=1e-3, tol=0.0, min_iter=99,
+        )
+
+        assert calls["grad"] > 0
+        assert calls["div"] > 0
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 11. Early convergence on degenerate problem
@@ -511,6 +578,88 @@ class TestInitKeys:
         keys = TVAL3Deconv._INIT_KEYS
         for deblur_only in ("num_iter", "lambda_tv", "tol", "verbose"):
             assert deblur_only not in keys, f"Unexpected deblur key in _INIT_KEYS: {deblur_only}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 12b. Numerical-failure contract
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestNumericalFailureContract:
+
+    def test_nonfinite_auxiliary_state_raises_floating_point_error(
+        self, blurred, small_psf, monkeypatch
+    ):
+        solver = TVAL3Deconv(blurred, small_psf, mu=16.0, adaptive_tv=False)
+        initial_state = backend._to_numpy(solver.estimated_image.copy())
+
+        def nonfinite_shrink(dx, dy, thresh, eps, tvnorm):
+            nan_h = backend.xp.full_like(dx, backend.xp.nan)
+            nan_w = backend.xp.full_like(dy, backend.xp.nan)
+            return nan_h, nan_w
+
+        monkeypatch.setattr(solver, "_shrink", nonfinite_shrink)
+
+        with pytest.raises(FloatingPointError, match="auxiliary"):
+            solver.deblur(num_iter=5, lambda_tv=0.01, tol=0.0, min_iter=999)
+
+        np.testing.assert_allclose(
+            backend._to_numpy(solver.estimated_image),
+            initial_state,
+        )
+        assert np.isfinite(backend._to_numpy(solver.estimated_image)).all()
+
+    def test_cost_explosion_returns_last_verified_finite_iterate(
+        self, blurred, small_psf, monkeypatch
+    ):
+        baseline_solver = TVAL3Deconv(blurred, small_psf, mu=16.0, adaptive_tv=False)
+        baseline = baseline_solver.deblur(
+            num_iter=1, lambda_tv=0.01, tol=0.0, min_iter=999
+        )
+
+        solver = TVAL3Deconv(blurred, small_psf, mu=16.0, adaptive_tv=False)
+        original_compute_cost = solver._compute_cost
+        call_count = {"n": 0}
+
+        def exploding_cost(w_h, w_w, Hx_k, lambda_tv, tvnorm):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return original_compute_cost(w_h, w_w, Hx_k, lambda_tv, tvnorm)
+            return 1e21
+
+        monkeypatch.setattr(solver, "_compute_cost", exploding_cost)
+
+        result = solver.deblur(num_iter=10, lambda_tv=0.01, tol=0.0, min_iter=999)
+
+        assert np.isfinite(result).all()
+        assert np.isfinite(backend._to_numpy(solver.estimated_image)).all()
+        assert len(solver.cost_history) == 2
+        np.testing.assert_allclose(result, baseline, atol=1e-6, rtol=1e-6)
+
+    def test_late_failure_may_preserve_last_finite_iterate_from_failed_call(
+        self, blurred, small_psf, monkeypatch
+    ):
+        solver = TVAL3Deconv(blurred, small_psf, mu=16.0, adaptive_tv=False)
+        initial = backend._to_numpy(solver.estimated_image.copy())
+        original_shrink = solver._shrink
+        calls = {"count": 0}
+
+        def _staged_shrink(dx, dy, thresh, eps, tvnorm):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return original_shrink(dx, dy, thresh, eps, tvnorm)
+            return (
+                backend.xp.full_like(dx, backend.xp.nan),
+                backend.xp.full_like(dy, backend.xp.nan),
+            )
+
+        monkeypatch.setattr(solver, "_shrink", _staged_shrink)
+
+        with pytest.raises(FloatingPointError):
+            solver.deblur(num_iter=2, lambda_tv=0.01, tol=0.0, min_iter=999)
+
+        final_state = backend._to_numpy(solver.estimated_image)
+        assert np.isfinite(final_state).all()
+        assert not np.allclose(final_state, initial)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

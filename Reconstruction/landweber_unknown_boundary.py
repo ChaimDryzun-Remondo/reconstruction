@@ -15,17 +15,27 @@ Uses FISTA acceleration (Beck & Teboulle 2009) with optional diagonal
 preconditioning by H^T M and adaptive restart (O'Donoghue & Candès 2015).
 The TV proximal operator is solved via Chambolle 2004 dual projection.
 
+Boundary model
+--------------
+Landweber uses masked data fidelity on the original support over the padded
+FFT canvas inherited from :class:`~._base.DeconvBase`. When TV is active, the
+regulariser is applied through a standalone Chambolle proximal subproblem, so
+the TV step belongs to the Neumann family rather than the periodic
+Fourier-diagonalized family.
+
 No ``__init__`` override — all setup is handled by :class:`~._base.DeconvBase`.
 
 Public API
 ----------
 LandweberUnknownBoundary : DeconvBase subclass
     Stateful deconvolution object.  Instantiate once, call :meth:`deblur`
-    one or more times.
+    one or more times. Repeated object-level calls warm-start from the stored
+    ``estimated_image`` iterate by default.
 
 landweber_deblur_unknown_boundary : convenience wrapper
     One-shot function.  Creates a ``LandweberUnknownBoundary``, calls
-    ``deblur``, and returns the result.
+    ``deblur``, and returns the result. Each wrapper call is a fresh cold
+    start.
 """
 from __future__ import annotations
 
@@ -49,6 +59,16 @@ class LandweberUnknownBoundary(DeconvBase):
     ``__init__`` override.  Implements only :meth:`deblur`.
 
     See :class:`DeconvBase` for constructor parameters.
+
+    Effective boundary model:
+
+    - padded FFT canvas from :class:`DeconvBase`
+    - masked data fidelity on the observed support Ω
+    - circular convolution on the full padded canvas
+    - Neumann-family TV proximal behaviour when ``lambda_tv > 0``
+
+    Repeated object-level :meth:`deblur` calls therefore warm-start from the
+    stored ``estimated_image`` iterate by default.
 
     References
     ----------
@@ -105,7 +125,8 @@ class LandweberUnknownBoundary(DeconvBase):
             proximal parameter γ = τ · λ / median(H^T M|_Ω).
         tv_n_inner : int
             Number of inner Chambolle iterations for the TV proximal
-            operator.
+            operator. This proximal TV solve uses the Neumann-family TV
+            boundary convention documented in ``_tv_operators.py``.
         adaptive_restart : bool
             Apply O'Donoghue-Candès velocity restart: when consecutive
             iterate steps reverse direction, reset momentum.
@@ -165,14 +186,39 @@ class LandweberUnknownBoundary(DeconvBase):
         x_km1 = x_k.copy()                    # previous iterate (x_{k-1})
         z_k   = x_k.copy()                    # momentum extrapolation point
         t_k   = 1.0                            # FISTA momentum parameter
+        last_finite = x_k.copy()
 
         for k in range(num_iter):
+            self._fail_on_nonfinite(
+                z_k,
+                name="Landweber extrapolated state z_k",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
 
             # ── Gradient of data fidelity at z_k ──────────────────────────
             # ∇f(z) = H^T [ M · (H z − y) ]
             Hz       = backend.irfft2(PF * backend.rfft2(z_k), s=fshape)
+            self._fail_on_nonfinite(
+                Hz,
+                name="Landweber forward model Hz",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
             residual = M * (Hz - y)
+            self._fail_on_nonfinite(
+                residual,
+                name="Landweber residual",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
             grad     = backend.irfft2(conjPF * backend.rfft2(residual), s=fshape)
+            self._fail_on_nonfinite(
+                grad,
+                name="Landweber gradient",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
 
             # ── Gradient descent step ─────────────────────────────────────
             if precondition:
@@ -180,6 +226,12 @@ class LandweberUnknownBoundary(DeconvBase):
                 x_half = z_k - tau * (grad / HTM)
             else:
                 x_half = z_k - tau * grad
+            self._fail_on_nonfinite(
+                x_half,
+                name="Landweber half-step state",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
 
             # ── Proximal TV step ──────────────────────────────────────────
             if use_tv:
@@ -190,6 +242,12 @@ class LandweberUnknownBoundary(DeconvBase):
             # ── Positivity projection ─────────────────────────────────────
             if enforce_positivity:
                 backend.xp.maximum(x_new, eps_pos, out=x_new)
+            self._fail_on_nonfinite(
+                x_new,
+                name="Landweber iterate",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
 
             # ── FISTA momentum update ─────────────────────────────────────
             t_new    = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t_k * t_k))
@@ -209,6 +267,12 @@ class LandweberUnknownBoundary(DeconvBase):
                     )
 
             z_new = x_new + momentum * (x_new - x_k)
+            self._fail_on_nonfinite(
+                z_new,
+                name="Landweber momentum state z_new",
+                iteration=k + 1,
+                last_finite=last_finite,
+            )
 
             # ── Convergence check ─────────────────────────────────────────
             if k >= min_iter and (k + 1) % check_every == 0:
@@ -223,12 +287,13 @@ class LandweberUnknownBoundary(DeconvBase):
             x_k   = x_new
             z_k   = z_new
             t_k   = t_new
+            last_finite = x_k.copy()
 
         else:
             self._log_no_convergence(num_iter, tol)
 
         # ── Store, crop, and return ───────────────────────────────────────
-        return self._crop_and_return(x_k)
+        return self._crop_and_return(x_k, last_finite=last_finite)
 
 
 def landweber_deblur_unknown_boundary(

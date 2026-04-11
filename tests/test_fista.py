@@ -18,6 +18,7 @@ Covers:
   - Wrapper fista_deblur matches class-based call
   - Overridable _prox_step extension point
   - Inheritance from DeconvBase
+  - Numerical-failure contract for non-finite iterates
 """
 from __future__ import annotations
 
@@ -605,6 +606,27 @@ class TestMask:
         assert h <= test_image.shape[0] and w <= test_image.shape[1]
 
 
+class TestBoundaryContract:
+
+    def test_tv_mode_uses_chambolle_tv_prox(self, blurred, small_psf, monkeypatch):
+        import Reconstruction._tv_operators as tv_ops
+
+        calls: list[tuple[float, int, tuple[int, int]]] = []
+        original = tv_ops.prox_tv_chambolle
+
+        def spy_prox(z, gamma, n_inner=50):
+            calls.append((float(gamma), int(n_inner), tuple(z.shape)))
+            return original(z, gamma=gamma, n_inner=n_inner)
+
+        monkeypatch.setattr(tv_ops, "prox_tv_chambolle", spy_prox)
+
+        FISTADeconv(blurred, small_psf).deblur(
+            num_iter=1, lambda_reg=1e-3, reg_mode="TV", tol=0.0, min_iter=1,
+        )
+
+        assert calls, "FISTA TV mode should call prox_tv_chambolle"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 12. reg_mode validation
 # ══════════════════════════════════════════════════════════════════════════════
@@ -660,6 +682,22 @@ class TestConvergence:
             num_iter=55, tol=100.0, min_iter=50, check_every=1
         )
         assert isinstance(result, np.ndarray)
+
+    def test_repeated_object_call_warm_starts_and_differs_from_wrapper_cold_start(
+        self, blurred, small_psf
+    ):
+        solver = FISTADeconv(blurred, small_psf)
+        solver.deblur(num_iter=5, lambda_reg=0.01, tol=0.0)
+
+        warm_result = solver.deblur(num_iter=1, lambda_reg=0.01, tol=0.0)
+        cold_result = fista_deblur(
+            blurred, small_psf, iters=1, lambda_reg=0.01, tol=0.0,
+        )
+
+        assert not np.allclose(warm_result, cold_result), (
+            "Repeated class calls should warm-start from the stored iterate, "
+            "unlike cold-start wrapper calls."
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -717,6 +755,13 @@ class _IdentityProxFISTA(FISTADeconv):
         return z.copy()
 
 
+class _NaNProxFISTA(FISTADeconv):
+    """Subclass that forces a non-finite proximal result."""
+
+    def _prox_step(self, z, threshold, reg_mode, tv_inner):
+        return backend.xp.full_like(z, backend.xp.nan)
+
+
 class TestOverridableProxStep:
 
     def test_identity_subclass_runs(self, blurred, small_psf, test_image):
@@ -739,6 +784,55 @@ class TestOverridableProxStep:
     def test_identity_subclass_is_fista_deconv(self):
         assert issubclass(_IdentityProxFISTA, FISTADeconv)
         assert issubclass(_IdentityProxFISTA, DeconvBase)
+
+
+class TestNumericalFailureContract:
+
+    def test_nonfinite_prox_result_raises_floating_point_error(self, blurred, small_psf):
+        solver = _NaNProxFISTA(blurred, small_psf)
+        with pytest.raises(FloatingPointError):
+            solver.deblur(
+                num_iter=1, lambda_reg=0.01, tol=0.0, min_iter=0, check_every=1
+            )
+
+    def test_failed_run_does_not_overwrite_estimated_image_with_nonfinite_values(
+        self, blurred, small_psf
+    ):
+        solver = _NaNProxFISTA(blurred, small_psf)
+        initial = np.array(solver.estimated_image, copy=True)
+
+        with pytest.raises(FloatingPointError):
+            solver.deblur(
+                num_iter=1, lambda_reg=0.01, tol=0.0, min_iter=0, check_every=1
+            )
+
+        final_state = np.array(solver.estimated_image)
+        assert np.isfinite(final_state).all()
+        np.testing.assert_allclose(final_state, initial, atol=0.0, rtol=0.0)
+
+    def test_late_failure_may_preserve_last_finite_iterate_from_failed_call(
+        self, blurred, small_psf, monkeypatch
+    ):
+        solver = FISTADeconv(blurred, small_psf)
+        initial = np.array(solver.estimated_image, copy=True)
+        calls = {"count": 0}
+
+        def _staged_prox(z, threshold, reg_mode, tv_inner):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return z.copy()
+            return backend.xp.full_like(z, backend.xp.nan)
+
+        monkeypatch.setattr(solver, "_prox_step", _staged_prox)
+
+        with pytest.raises(FloatingPointError):
+            solver.deblur(
+                num_iter=2, lambda_reg=1e-3, tol=0.0, min_iter=99, check_every=1,
+            )
+
+        final_state = np.array(solver.estimated_image)
+        assert np.isfinite(final_state).all()
+        assert not np.allclose(final_state, initial)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -247,6 +247,41 @@ class TestUseMask:
         solver = ADMMDeconv(blurred, small_psf, rho_v=16.0, rho_w=16.0)
         assert solver.mask.shape == solver.full_shape
 
+    def test_use_mask_true_by_default(self, blurred, small_psf):
+        """ADMM uses masked fidelity on the observed support by default."""
+        solver = ADMMDeconv(blurred, small_psf, rho_v=16.0, rho_w=16.0)
+        assert solver.use_mask is True
+
+
+class TestBoundaryContract:
+
+    def test_tv_prior_uses_periodic_gradient_and_divergence(
+        self, blurred, small_psf, monkeypatch
+    ):
+        import Reconstruction.admm as admm_mod
+
+        calls = {"grad": 0, "div": 0}
+        original_grad = admm_mod.forward_grad_periodic
+        original_div = admm_mod.backward_div_periodic
+
+        def spy_grad(x):
+            calls["grad"] += 1
+            return original_grad(x)
+
+        def spy_div(p_h, p_w):
+            calls["div"] += 1
+            return original_div(p_h, p_w)
+
+        monkeypatch.setattr(admm_mod, "forward_grad_periodic", spy_grad)
+        monkeypatch.setattr(admm_mod, "backward_div_periodic", spy_div)
+
+        ADMMDeconv(blurred, small_psf, rho_v=16.0, rho_w=16.0).deblur(
+            num_iter=1, lambda_tv=1e-3, tol=0.0, min_iter=99,
+        )
+
+        assert calls["grad"] > 0
+        assert calls["div"] > 0
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 6. Cost history
@@ -291,6 +326,18 @@ class TestCostHistory:
         assert costs[-1] <= costs[0] * 10.0, (
             f"Cost increased dramatically: {costs[0]:.3e} → {costs[-1]:.3e}"
         )
+
+    def test_cost_history_resets_between_deblur_calls(self, blurred, small_psf):
+        """Each deblur() call should replace cost_history rather than append."""
+        solver = ADMMDeconv(blurred, small_psf, rho_v=16.0, rho_w=16.0)
+        solver.deblur(num_iter=4, lambda_tv=0.01, tol=0.0, min_iter=999)
+        first_len = len(solver.cost_history)
+
+        solver.deblur(num_iter=1, lambda_tv=0.01, tol=0.0, min_iter=999)
+        second_len = len(solver.cost_history)
+
+        assert first_len == 5
+        assert second_len == 2
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -389,6 +436,26 @@ class TestConvergence:
             min_iter=min_iter,
         )
         assert len(solver.cost_history) >= min_iter + 1
+
+    def test_repeated_object_call_warm_starts_and_differs_from_wrapper_cold_start(
+        self, blurred, small_psf
+    ):
+        solver = ADMMDeconv(blurred, small_psf, rho_v=16.0, rho_w=16.0)
+        solver.deblur(num_iter=5, lambda_tv=0.01, tol=0.0, min_iter=999)
+
+        warm_result = solver.deblur(
+            num_iter=1, lambda_tv=0.01, tol=0.0, min_iter=999
+        )
+        cold_result = admm_deblur(
+            blurred, small_psf,
+            iters=1, lambda_tv=0.01, tol=0.0, min_iter=999,
+            rho_v=16.0, rho_w=16.0,
+        )
+
+        assert not np.allclose(warm_result, cold_result), (
+            "Repeated class calls should warm-start from the stored iterate, "
+            "unlike cold-start wrapper calls."
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -566,6 +633,80 @@ class TestOverridablePrior:
         assert call_count[0] == num_iter, (
             f"_prior_update called {call_count[0]} times; expected {num_iter}"
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 12b. Numerical-failure contract
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestNumericalFailureContract:
+
+    def test_nonfinite_prior_state_raises_floating_point_error(self, blurred, small_psf):
+        class NonFinitePriorStateADMM(ADMMDeconv):
+            def _prior_update(self, u, state, lambda_tv, rho_w, eps):
+                prior_rhs = super()._prior_update(u, state, lambda_tv, rho_w, eps)
+                state["w_h"] = backend.xp.full_like(state["w_h"], backend.xp.nan)
+                return prior_rhs
+
+        solver = NonFinitePriorStateADMM(blurred, small_psf, rho_v=16.0, rho_w=16.0)
+        initial_state = backend._to_numpy(solver.estimated_image.copy())
+
+        with pytest.raises(FloatingPointError, match="prior state"):
+            solver.deblur(num_iter=5, lambda_tv=0.01, tol=0.0, min_iter=999)
+
+        np.testing.assert_allclose(
+            backend._to_numpy(solver.estimated_image),
+            initial_state,
+        )
+        assert np.isfinite(backend._to_numpy(solver.estimated_image)).all()
+
+    def test_cost_explosion_returns_last_verified_finite_iterate(self, blurred, small_psf, monkeypatch):
+        baseline_solver = ADMMDeconv(blurred, small_psf, rho_v=16.0, rho_w=16.0)
+        baseline = baseline_solver.deblur(
+            num_iter=1, lambda_tv=0.01, tol=0.0, min_iter=999
+        )
+
+        solver = ADMMDeconv(blurred, small_psf, rho_v=16.0, rho_w=16.0)
+        original_compute_cost = solver._compute_admm_cost
+        call_count = {"n": 0}
+
+        def exploding_cost(Hx, lambda_tv, state, tvnorm):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return original_compute_cost(Hx, lambda_tv, state, tvnorm)
+            return 1e21
+
+        monkeypatch.setattr(solver, "_compute_admm_cost", exploding_cost)
+
+        result = solver.deblur(num_iter=10, lambda_tv=0.01, tol=0.0, min_iter=999)
+
+        assert np.isfinite(result).all()
+        assert np.isfinite(backend._to_numpy(solver.estimated_image)).all()
+        assert len(solver.cost_history) == 2
+        np.testing.assert_allclose(result, baseline, atol=1e-6, rtol=1e-6)
+
+    def test_late_failure_may_preserve_last_finite_iterate_from_failed_call(
+        self, blurred, small_psf, monkeypatch
+    ):
+        solver = ADMMDeconv(blurred, small_psf, rho_v=16.0, rho_w=16.0)
+        initial = backend._to_numpy(solver.estimated_image.copy())
+        original_prior_update = solver._prior_update
+        calls = {"count": 0}
+
+        def _staged_prior_update(u, state, lambda_tv, rho_w, eps):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return original_prior_update(u, state, lambda_tv, rho_w, eps)
+            return backend.xp.full_like(u, backend.xp.nan)
+
+        monkeypatch.setattr(solver, "_prior_update", _staged_prior_update)
+
+        with pytest.raises(FloatingPointError):
+            solver.deblur(num_iter=2, lambda_tv=0.01, tol=0.0, min_iter=999)
+
+        final_state = backend._to_numpy(solver.estimated_image)
+        assert np.isfinite(final_state).all()
+        assert not np.allclose(final_state, initial)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

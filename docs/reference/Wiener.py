@@ -264,7 +264,7 @@ class Wiener:
     paddingMode : str
         Border extension strategy used when padding the *image* before FFT.
         "Reflect" is recommended as it minimises spectral leakage at image
-        boundaries.  The PSF is always padded with "Edge" (zero-order hold).
+        boundaries.  The PSF is always padded with "Zero".
     padding_scale : float ≥ 1.0
         Controls the padded FFT canvas size.  The canvas height/width is
         ``image_size + padding_scale * psf_size`` (rounded up to the next odd

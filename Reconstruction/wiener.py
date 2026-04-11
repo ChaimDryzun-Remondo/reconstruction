@@ -21,10 +21,13 @@ Public API
 WienerDeconv : DeconvBase subclass
     Stateful deconvolution object.  Instantiate once, call :meth:`deblur`
     repeatedly with different alpha values (constructor FFTs amortised).
+    Repeated calls reuse setup and update diagnostics, but they do not
+    warm-start from a previous output iterate because Wiener is not
+    iterative.
 
 wiener_deblur : convenience wrapper
     One-shot function.  Creates a ``WienerDeconv``, calls ``deblur``,
-    and returns the result.
+    and returns the result. Each wrapper call is a fresh cold start.
 
 References
 ----------
@@ -81,24 +84,45 @@ class WienerDeconv(DeconvBase):
     Laplacian FFT).  :meth:`deblur` is therefore cheap to call repeatedly
     with different α values — useful for parameter sweeps.
 
+    ``WienerDeconv`` is stateful for setup reuse and diagnostics
+    (for example ``last_alpha`` and ``sigma_est``), but not for iterate warm
+    starts: repeated :meth:`deblur` calls do not read the previous
+    ``estimated_image`` as an initial state.
+
     Inherits image preprocessing (grayscale, normalisation, canvas sizing,
     GPU warm-up) from :class:`DeconvBase` with two fixed overrides:
 
-    * ``use_mask=False`` — Wiener does not support masked data fidelity.
+    * ``use_mask=False`` — Wiener does not support masked data fidelity and is
+      therefore not an unknown-boundary masked solver in the package sense.
     * ``apply_taper_on_padding_band=True`` — cosine taper at the image
       boundary suppresses Gibbs ringing in the frequency domain.
 
-    After calling ``super().__init__()``, the PSF is re-conditioned with
-    Wiener-optimised parameters (wider outer taper, ``taper_outer_frac=0.90``)
-    that preserve more of the OTF compared to the iterative-algorithm default.
+    The resulting boundary model is a padded / tapered circular deconvolution
+    model: the image is extended to a larger FFT canvas, tapered on the
+    padding band, and then restored without an ``M``-restricted fidelity term.
+
+    After calling ``super().__init__()``, Wiener rebuilds the PSF spectrum from
+    the original PSF using the same centre-of-mass centering, negative
+    clipping, odd-shape enforcement, zero-padding, and `ifftshift` placement
+    policy as :class:`DeconvBase`, but with a distinct conditioning preset:
+
+    * iterative-family default:
+      `bg_ring_frac=0.15`, `taper_outer_frac=0.20`, `taper_end_frac=0.50`
+    * Wiener override:
+      `bg_ring_frac=0.15`, `taper_outer_frac=0.90`, `taper_end_frac=1.0`
+
+    So Wiener and the iterative-family solvers do not, by default, operate on
+    identical conditioned PSFs.
 
     Parameters
     ----------
     image : np.ndarray
         Observed (blurred + noisy) image.  2-D grayscale or 3-D RGB/RGBA.
     psf : np.ndarray
-        Point spread function.  Need not be normalised; negative values are
-        clipped; odd shape is enforced internally.
+        Point spread function before the package preprocessing policy is
+        applied. The PSF is centred by centre of mass, negative values are
+        clipped, odd shape is enforced, then Wiener's solver-specific
+        conditioning preset is applied before zero-padding and `ifftshift`.
     mode : {"Tikhonov", "Classical", "Spectrum"}
         Regularisation strategy.  See module docstring for details.
         Default ``"Tikhonov"``.
@@ -131,6 +155,12 @@ class WienerDeconv(DeconvBase):
         Conjugate OTF (alias of ``conjPF``).
     L2 : xp.ndarray, float
         |FFT(Laplacian)|², precomputed for Tikhonov mode.
+
+    Notes
+    -----
+    The object stores the most recent returned image in ``estimated_image``
+    for consistency with :class:`DeconvBase`, but Wiener does not use that
+    stored image as input to subsequent :meth:`deblur` calls.
 
     References
     ----------

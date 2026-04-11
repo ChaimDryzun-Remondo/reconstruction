@@ -47,6 +47,21 @@ Internal computation uses float64 for numerical stability of dual variable
 accumulation across many iterations.  Inputs and outputs remain float32/numpy
 as per the package convention.
 
+Boundary model
+--------------
+TVAL3 uses masked data fidelity on the original support over the padded FFT
+canvas inherited from :class:`~._base.DeconvBase`. Its exact x-update is
+Fourier-diagonalized with the eigenvalues of `∇^T∇` under periodic BC, so the
+periodic gradient / divergence pair is part of the solver contract rather than
+an internal implementation accident.
+
+Statefulness
+------------
+``TVAL3Deconv`` is a stateful iterative solver. Repeated object-level
+``deblur()`` calls warm-start from the stored ``estimated_image`` iterate and
+replace per-call diagnostics such as ``cost_history`` / ``last_mu``. The
+wrapper ``tval3_deblur`` is a fresh cold-start helper.
+
 References
 ----------
 [1] C. Li, W. Yin, H. Jiang, Y. Zhang, "An Efficient Augmented Lagrangian
@@ -84,6 +99,12 @@ class TVAL3Deconv(DeconvBase):
 
     See module docstring for the full mathematical formulation.
 
+    Repeated object-level :meth:`deblur` calls warm-start from the stored
+    ``estimated_image`` iterate by default. On finite cost-explosion /
+    divergence paths the solver returns and stores the last verified finite
+    iterate; on explicit numerical failure it raises while preserving finite
+    persistent state.
+
     Parameters
     ----------
     image : np.ndarray
@@ -119,6 +140,13 @@ class TVAL3Deconv(DeconvBase):
     use_mask=False makes M = 1 everywhere, disabling the boundary
     abstraction and making the v-update a simple weighted average of y
     and Hx without any masking benefit.
+
+    Effective boundary model:
+
+    - padded FFT canvas from :class:`DeconvBase`
+    - masked data fidelity on the observed support Ω
+    - circular convolution on the full padded canvas
+    - periodic gradient / divergence operators in the TV split
     """
 
     _INIT_KEYS: frozenset[str] = DeconvBase._INIT_KEYS | frozenset({
@@ -462,6 +490,7 @@ class TVAL3Deconv(DeconvBase):
             backend.ifft2(self.H_full * backend.fft2(u))
         )
         dx, dy = forward_grad_periodic(u)
+        last_finite: "backend.xp.ndarray" = u.copy()
 
         # Initialise auxiliary and dual variables
         v: "backend.xp.ndarray" = Hx_k.copy()
@@ -494,6 +523,12 @@ class TVAL3Deconv(DeconvBase):
             # M=1 → (y + ρ_v(Hx+d_v)) / (1 + ρ_v)  (weighted average)
             # M=0 → Hx + d_v                          (no data constraint)
             v = (mask_f64 * y_f64 + rho_v * (Hx_k + d_v)) / (mask_f64 + rho_v)
+            self._fail_on_nonfinite(
+                v,
+                name="TVAL3 data consensus state",
+                iteration=k,
+                last_finite=last_finite,
+            )
 
             # ── Step 2: x-update (exact FFT solve) ─────────────────────────
             # Solve: (ρ_v H^TH + ρ_w G^TG) x = rhs
@@ -507,25 +542,59 @@ class TVAL3Deconv(DeconvBase):
                 - rho_w * backward_div_periodic(w_h - d_w_h, w_w - d_w_w)
             )
             denom = rho_v * self.H_H_conj + rho_w * self.lap_fft
+            self._fail_on_nonfinite(
+                rhs,
+                name="TVAL3 x-update RHS",
+                iteration=k,
+                last_finite=last_finite,
+            )
+            self._fail_on_nonfinite(
+                denom,
+                name="TVAL3 x-update denominator",
+                iteration=k,
+                last_finite=last_finite,
+            )
             u = backend.xp.real(backend.ifft2(backend.fft2(rhs) / (denom + eps)))
 
             # ── Step 3: NaN/Inf check (Bug-fix #5: before cost/projection) ─
-            if not bool(backend.xp.isfinite(u).all()):
-                logger.warning(
-                    "NaN/Inf in u at iteration %d; stopping early.", k
-                )
-                raise FloatingPointError(
-                    f"NaN/Inf encountered at iteration {k}; "
-                    "check lambda_tv or initial mu."
-                )
+            self._fail_on_nonfinite(
+                u,
+                name="TVAL3 primal iterate",
+                iteration=k,
+                last_finite=last_finite,
+            )
 
             # Positivity projection
             if _nonneg:
                 u = backend.xp.maximum(u, eps_pos)
+                self._fail_on_nonfinite(
+                    u,
+                    name="TVAL3 primal iterate after positivity projection",
+                    iteration=k,
+                    last_finite=last_finite,
+                )
 
             # ── Step 4: Recompute Hx and gradients for next iteration ──────
             Hx_k = backend.xp.real(backend.ifft2(self.H_full * backend.fft2(u)))
             dx, dy = forward_grad_periodic(u)
+            self._fail_on_nonfinite(
+                Hx_k,
+                name="TVAL3 forward projection",
+                iteration=k,
+                last_finite=last_finite,
+            )
+            self._fail_on_nonfinite(
+                dx,
+                name="TVAL3 horizontal gradient state",
+                iteration=k,
+                last_finite=last_finite,
+            )
+            self._fail_on_nonfinite(
+                dy,
+                name="TVAL3 vertical gradient state",
+                iteration=k,
+                last_finite=last_finite,
+            )
 
             # ── Step 5: w-update (vectorial shrinkage) ─────────────────────
             if _adaptive and k > burn_in_iters:
@@ -536,11 +605,42 @@ class TVAL3Deconv(DeconvBase):
             w_h, w_w = self._shrink(
                 dx + d_w_h, dy + d_w_w, threshold, _EPS_GRAD, _tvnorm
             )
+            self._fail_on_nonfinite(
+                w_h,
+                name="TVAL3 auxiliary state (w_h)",
+                iteration=k,
+                last_finite=last_finite,
+            )
+            self._fail_on_nonfinite(
+                w_w,
+                name="TVAL3 auxiliary state (w_w)",
+                iteration=k,
+                last_finite=last_finite,
+            )
 
             # ── Step 6: Dual updates (Boyd convention: d += violation) ─────
             d_v += Hx_k - v
             d_w_h += dx - w_h
             d_w_w += dy - w_w
+            self._fail_on_nonfinite(
+                d_v,
+                name="TVAL3 data dual state",
+                iteration=k,
+                last_finite=last_finite,
+            )
+            self._fail_on_nonfinite(
+                d_w_h,
+                name="TVAL3 horizontal dual state",
+                iteration=k,
+                last_finite=last_finite,
+            )
+            self._fail_on_nonfinite(
+                d_w_w,
+                name="TVAL3 vertical dual state",
+                iteration=k,
+                last_finite=last_finite,
+            )
+            last_finite = u.copy()
 
             # ── Step 7: Cost + logging ──────────────────────────────────────
             cost = self._compute_cost(w_h, w_w, Hx_k, lambda_tv, _tvnorm)
@@ -610,7 +710,10 @@ class TVAL3Deconv(DeconvBase):
 
         self._last_mu = rho_v
         del d_v, d_w_h, d_w_w, v, w_h, w_w, dx, dy, Hx_k, rhs, denom
-        return self._crop_and_return(u.astype(backend.xp.float32))
+        return self._crop_and_return(
+            u.astype(backend.xp.float32),
+            last_finite=last_finite.astype(backend.xp.float32),
+        )
 
     # ══════════════════════════════════════════════════════════════════════
     # Properties

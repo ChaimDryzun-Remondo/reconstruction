@@ -81,6 +81,13 @@ The λ for the denominator comes from the ``lambda_reg`` passed to
 ``self._current_lambda`` before calling the parent loop, so
 ``_x_update_denom`` can access it.
 
+Statefulness
+------------
+``REDDeconv`` inherits ADMM's stateful warm-start behaviour. Repeated
+object-level ``deblur()`` calls start from the stored ``estimated_image``
+iterate, while the wrapper ``red_deblur`` is a fresh cold start.
+Per-call diagnostics such as ``cost_history`` are replaced on each call.
+
 References
 ----------
 [REM17] Romano, Y., Elad, M. & Milanfar, P. "The little engine that
@@ -125,6 +132,10 @@ class REDDeconv(ADMMDeconv):
     only the data-fidelity split v = Hx.  The denoiser σ is **fixed**
     throughout all iterations (set at construction time), giving more
     predictable regularization strength.
+
+    Repeated object-level :meth:`deblur` calls warm-start from the stored
+    ``estimated_image`` iterate by default. The convenience wrapper remains a
+    cold-start helper.
 
     Parameters
     ----------
@@ -353,9 +364,20 @@ class REDDeconv(ADMMDeconv):
             prior_rhs = λ · D_σ(u), spatial domain, same shape as u.
         """
         denoised = self._denoise(u, self._sigma)
+        self._fail_on_nonfinite(
+            denoised,
+            name="RED denoiser output",
+            last_finite=u,
+        )
         state["denoised"] = denoised
         logger.debug("RED prior_update: sigma=%.4f", self._sigma)
-        return lambda_tv * denoised
+        prior_rhs = lambda_tv * denoised
+        self._fail_on_nonfinite(
+            prior_rhs,
+            name="RED prior RHS",
+            last_finite=u,
+        )
+        return prior_rhs
 
     def _prior_dual_update(self, u: "backend.xp.ndarray", state: dict) -> None:
         """
