@@ -150,15 +150,19 @@ class RLUnknownBoundary(DeconvBase):
             )
 
             # ── Step 7: Convergence check ─────────────────────────────────
+            converged = False
             if k >= min_iter and (k + 1) % check_every == 0:
                 _, converged = self._check_convergence(
                     x_new, x_k, k=k, num_iter=num_iter, tol=tol,
                 )
-                if converged:
-                    break
 
+            # Advance state *before* breaking so the returned iterate is the
+            # improved one that was just validated (fix for F1).
             x_k = x_new
             last_finite = x_k.copy()
+
+            if converged:
+                break
 
         else:
             self._log_no_convergence(num_iter, tol)
