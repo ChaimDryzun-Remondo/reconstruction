@@ -379,6 +379,15 @@ class FISTADeconv(DeconvBase):
                     )
 
             # ── 8. Advance state ─────────────────────────────────────────
+            # F12: ``x_km1 = x_k`` is an alias rotation — each name ends up
+            # pointing at a distinct array (the one that was x_new two
+            # iterations ago, one iteration ago, and this iteration).  The
+            # restart test at step 7 reads
+            # ``(x_new − x_k) * (x_k − x_km1)``, which is correct only so
+            # long as nothing in the iteration body mutates x_k or x_km1
+            # in place.  Positivity projection writes via ``out=x_new``,
+            # never ``out=x_k``; if a future refactor adds ``out=x_k`` or
+            # similar, insert ``x_km1 = x_k.copy()`` to harden this.
             x_km1 = x_k
             x_k   = x_new
             y_k   = y_new
