@@ -341,7 +341,15 @@ class ChambollePockDeconv(DeconvBase):
         last_finite = x.copy()
 
         for k in range(num_iter):
-            x_old = x
+            # F11: ``x_prev`` is an *alias* of ``x``, not a copy.  This is
+            # safe only because nothing in steps 1–6 below mutates ``x`` in
+            # place (``x_new`` is always a fresh allocation from
+            # ``x - tau * grad_G + tau * div_p``; positivity projection
+            # writes to ``x_new`` via ``out=x_new``, never to ``x``).  If a
+            # future refactor adds an ``out=x`` anywhere in the iteration
+            # body, this aliasing becomes a silent correctness bug —
+            # switch to ``x_prev = x.copy()`` at that point.
+            x_prev = x
             self._fail_on_nonfinite(
                 x_bar,
                 name="Chambolle-Pock extrapolated state x_bar",
@@ -446,7 +454,7 @@ class ChambollePockDeconv(DeconvBase):
             # ── 5. Convergence check ─────────────────────────────────────
             if k >= min_iter and (k + 1) % check_every == 0:
                 _, converged = self._check_convergence(
-                    x_new, x_old, k=k, num_iter=num_iter, tol=tol,
+                    x_new, x_prev, k=k, num_iter=num_iter, tol=tol,
                 )
                 if converged:
                     x = x_new   # return the converged iterate
