@@ -566,7 +566,11 @@ class TVAL3Deconv(DeconvBase):
                 iteration=k,
                 last_finite=last_finite,
             )
-            u = backend.xp.real(backend.ifft2(backend.fft2(rhs) / (denom + eps)))
+            # F5: keep the x-update spectrum U around so the forward
+            # projection below can reuse it when the positivity projection
+            # is off (u is a pure real-valued ifft2 of U, so fft2(u) == U).
+            U = backend.fft2(rhs) / (denom + eps)
+            u = backend.xp.real(backend.ifft2(U))
 
             # ── Step 3: NaN/Inf check (Bug-fix #5: before cost/projection) ─
             self._fail_on_nonfinite(
@@ -576,7 +580,7 @@ class TVAL3Deconv(DeconvBase):
                 last_finite=last_finite,
             )
 
-            # Positivity projection
+            # Positivity projection (mutates u, invalidating the cached U).
             if _nonneg:
                 u = backend.xp.maximum(u, eps_pos)
                 self._fail_on_nonfinite(
@@ -587,7 +591,13 @@ class TVAL3Deconv(DeconvBase):
                 )
 
             # ── Step 4: Recompute Hx and gradients for next iteration ──────
-            Hx_k = backend.xp.real(backend.ifft2(self.H_full * backend.fft2(u)))
+            if _nonneg:
+                Hx_k = backend.xp.real(
+                    backend.ifft2(self.H_full * backend.fft2(u))
+                )
+            else:
+                # F5: reuse the cached spectrum — one fft2 saved per iter.
+                Hx_k = backend.xp.real(backend.ifft2(self.H_full * U))
             dx, dy = forward_grad_periodic(u)
             self._fail_on_nonfinite(
                 Hx_k,

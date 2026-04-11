@@ -694,7 +694,11 @@ class ADMMDeconv(DeconvBase):
                 iteration=k,
                 last_finite=last_finite,
             )
-            u = backend.xp.real(backend.ifft2(backend.fft2(rhs) / (denom + eps)))
+            # F5: keep the x-update spectrum U around so the forward
+            # projection below can reuse it when the positivity projection
+            # is off (u is a pure real-valued ifft2 of U, so fft2(u) == U).
+            U = backend.fft2(rhs) / (denom + eps)
+            u = backend.xp.real(backend.ifft2(U))
 
             # ── Step 4: NaN/Inf guard ──────────────────────────────────────
             self._fail_on_nonfinite(
@@ -704,7 +708,7 @@ class ADMMDeconv(DeconvBase):
                 last_finite=last_finite,
             )
 
-            # Positivity projection
+            # Positivity projection (mutates u, invalidating the cached U).
             if _nonneg:
                 u = backend.xp.maximum(u, eps_pos)
                 self._fail_on_nonfinite(
@@ -715,7 +719,13 @@ class ADMMDeconv(DeconvBase):
                 )
 
             # ── Step 5: Recompute Hx with new u ───────────────────────────
-            Hx_k = backend.xp.real(backend.ifft2(self.H_full * backend.fft2(u)))
+            if _nonneg:
+                Hx_k = backend.xp.real(
+                    backend.ifft2(self.H_full * backend.fft2(u))
+                )
+            else:
+                # F5: reuse the cached spectrum — one fft2 saved per iter.
+                Hx_k = backend.xp.real(backend.ifft2(self.H_full * U))
             self._fail_on_nonfinite(
                 Hx_k,
                 name="ADMM forward projection",
