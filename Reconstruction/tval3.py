@@ -80,7 +80,7 @@ import numpy as np
 
 from . import _backend as backend
 from ._base import DeconvBase, _split_init_and_deblur_kwargs
-from ._tv_operators import forward_grad_periodic, backward_div_periodic
+from ._tv_operators import backward_div_periodic, forward_grad_periodic, shrink_tv
 
 logger = logging.getLogger(__name__)
 
@@ -270,30 +270,12 @@ class TVAL3Deconv(DeconvBase):
         """
         Shrinkage / vectorial soft-thresholding.
 
-        Parameters
-        ----------
-        x, y : xp.ndarray
-            Horizontal and vertical gradient components.
-        thresh : float or xp.ndarray
-            Uniform or spatially-varying threshold.
-        eps : float
-            Denominator floor for TVnorm=2 (isotropic).
-        tvnorm : int
-            1 for anisotropic componentwise, 2 for isotropic vectorial.
-
-        Returns
-        -------
-        (x_s, y_s) : tuple[xp.ndarray, xp.ndarray]
+        F14: the body lives in ``_tv_operators.shrink_tv`` (shared with
+        ADMMDeconv).  This thin wrapper is retained so the
+        numerical-failure contract tests can still monkey-patch
+        ``solver._shrink`` as a fault-injection seam.
         """
-        if tvnorm == 1:
-            return (
-                backend.xp.sign(x) * backend.xp.maximum(backend.xp.abs(x) - thresh, 0.0),
-                backend.xp.sign(y) * backend.xp.maximum(backend.xp.abs(y) - thresh, 0.0),
-            )
-        else:
-            mag = backend.xp.sqrt(x * x + y * y)
-            scale = backend.xp.maximum(mag - thresh, 0.0) / (mag + eps)
-            return scale * x, scale * y
+        return shrink_tv(x, y, thresh, eps, tvnorm)
 
     def _compute_edge_map(
         self, u: xp.ndarray, lambda_tv: float
