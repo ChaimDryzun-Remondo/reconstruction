@@ -465,7 +465,10 @@ class ChambollePockDeconv(DeconvBase):
             x   = x_new
             p_h = p_h_new
             p_w = p_w_new
-            last_finite = x.copy()
+            # F10: refresh the rollback snapshot at the convergence-check
+            # cadence rather than every iteration.
+            if (k + 1) % check_every == 0:
+                last_finite = x.copy()
 
         else:
             self._log_no_convergence(num_iter, tol)

@@ -383,7 +383,10 @@ class FISTADeconv(DeconvBase):
             x_k   = x_new
             y_k   = y_new
             t_k   = t_new
-            last_finite = x_k.copy()
+            # F10: refresh the rollback snapshot at the convergence-check
+            # cadence rather than every iteration.
+            if (k + 1) % check_every == 0:
+                last_finite = x_k.copy()
 
         else:
             self._log_no_convergence(num_iter, tol)

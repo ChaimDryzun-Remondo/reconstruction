@@ -159,7 +159,11 @@ class RLUnknownBoundary(DeconvBase):
             # Advance state *before* breaking so the returned iterate is the
             # improved one that was just validated (fix for F1).
             x_k = x_new
-            last_finite = x_k.copy()
+            # F10: refresh the rollback snapshot at the convergence-check
+            # cadence rather than every iteration.  Always refresh on
+            # convergence so the returned last_finite matches x_k.
+            if converged or (k + 1) % check_every == 0:
+                last_finite = x_k.copy()
 
             if converged:
                 break
