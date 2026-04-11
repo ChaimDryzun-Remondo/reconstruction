@@ -132,12 +132,13 @@ class RLUnknownBoundary(DeconvBase):
                 x_new = x_k * (back / (HTM + eps_dev))
 
             # ── Step 5: Optional multiplicative TV correction ─────────────
+            # F17: hoist the identical correction call out of both branches;
+            # only the application rule differs.
             if use_tv:
+                correction = tv_multiplicative_correction(x_k, lam)
                 if tv_on_full_canvas:
-                    correction = tv_multiplicative_correction(x_k, lam)
                     x_new /= correction
                 else:
-                    correction = tv_multiplicative_correction(x_k, lam)
                     x_new = x_new / (1.0 + (correction - 1.0) * M)
 
             # ── Step 6: Positivity projection ────────────────────────────
