@@ -516,8 +516,16 @@ class ChambollePockDeconv(DeconvBase):
         """
         if self._TVnorm == 2:
             if float(lam) <= 0.0:
-                zero = backend.xp.zeros_like(p_h)
-                return zero, zero.copy()
+                # F15: return two independent buffers rather than a
+                # half-aliased pair (``zero, zero.copy()``).  Caller
+                # rebinds ``p_h``/``p_w`` to these, and the next-iter
+                # update allocates fresh arrays via ``p_h + sigma*dx_bar``
+                # so the aliasing is currently harmless; the symmetry is
+                # cleaner regardless.
+                return (
+                    backend.xp.zeros_like(p_h),
+                    backend.xp.zeros_like(p_h),
+                )
             # Isotropic: project per-pixel (p_h, p_w) vector onto the λ-disk.
             # scale = λ / max(‖p‖₂, λ) — equals 1 when ‖p‖₂ ≤ λ (no-op).
             mag   = backend.xp.sqrt(p_h * p_h + p_w * p_w)
