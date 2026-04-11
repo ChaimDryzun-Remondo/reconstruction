@@ -31,7 +31,7 @@ import logging
 import numpy as np
 
 from . import _backend as backend
-from ._base import DeconvBase
+from ._base import DeconvBase, _split_init_and_deblur_kwargs
 from ._tv_operators import tv_multiplicative_correction
 
 logger = logging.getLogger(__name__)
@@ -195,7 +195,8 @@ def rl_deblur_unknown_boundary(
         Deconvolved image, shape (H, W) matching the original image
         field of view.
     """
-    init_kw   = {k: v for k, v in kwargs.items() if k in DeconvBase._INIT_KEYS}
-    deblur_kw = {k: v for k, v in kwargs.items() if k not in DeconvBase._INIT_KEYS}
+    init_kw, deblur_kw = _split_init_and_deblur_kwargs(
+        DeconvBase._INIT_KEYS, kwargs
+    )
     obj = RLUnknownBoundary(image=image, psf=psf, **init_kw)
     return obj.deblur(**deblur_kw)

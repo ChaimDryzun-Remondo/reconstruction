@@ -104,7 +104,7 @@ from typing import Optional
 import numpy as np
 
 from . import _backend as backend
-from ._base import DeconvBase
+from ._base import DeconvBase, _split_init_and_deblur_kwargs
 from ._tv_operators import forward_grad_periodic, backward_div_periodic
 
 logger = logging.getLogger(__name__)
@@ -555,9 +555,8 @@ def chambolle_pock_deblur(
     np.ndarray
         Deconvolved image, shape (H, W) matching the original image FOV.
     """
-    init_kw   = {k: v for k, v in kwargs.items()
-                 if k in ChambollePockDeconv._INIT_KEYS}
-    deblur_kw = {k: v for k, v in kwargs.items()
-                 if k not in ChambollePockDeconv._INIT_KEYS}
+    init_kw, deblur_kw = _split_init_and_deblur_kwargs(
+        ChambollePockDeconv._INIT_KEYS, kwargs
+    )
     solver = ChambollePockDeconv(image, psf, **init_kw)
     return solver.deblur(num_iter=iters, lambda_tv=lambda_tv, **deblur_kw)

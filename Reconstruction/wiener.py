@@ -45,7 +45,14 @@ import numpy as np
 from scipy.signal import convolve2d as _cpu_convolve2d
 
 from . import _backend as backend
-from ._base import DeconvBase
+from ._base import (
+    DeconvBase,
+    _WIENER_PSF_BG_RING_FRAC,
+    _WIENER_PSF_TAPER_END_FRAC,
+    _WIENER_PSF_TAPER_OUTER_FRAC,
+    _prepare_psf_fft,
+    _split_init_and_deblur_kwargs,
+)
 from ._common import padding, cropping, psf_preprocess, condition_psf
 
 logger = logging.getLogger(__name__)
@@ -224,28 +231,17 @@ class WienerDeconv(DeconvBase):
         # aggressive, suited for iterative methods that tolerate OTF zeros).
         # Wiener benefits from a wider outer taper (0.90) that preserves more
         # of the OTF magnitude while still suppressing PSF tail noise.
-        psf_np: np.ndarray = psf_preprocess(
-            psf=psf,
-            center_method="com",
-            remove_negatives="clip",
-            eps=1e-12,
-            enforce_odd_shape=True,
-        )
-        psf_np = condition_psf(
-            psf=psf_np,
-            bg_ring_frac=0.15,
-            taper_outer_frac=0.90,
-            taper_end_frac=1.0,
-        )
-        psf_pad: "backend.xp.ndarray" = backend.xp.array(
-            padding(image=psf_np, full_size=self.full_shape, Type="Zero", apply_taper=False),
-            dtype=backend.xp.float32,
-        )
-        psf_pad = backend.ifftshift(psf_pad)
-
         # Overwrite the PF/conjPF set by the base class.
-        self.PF = backend._freeze(backend.rfft2(psf_pad))
-        self.conjPF = backend._freeze(self.PF.conj())
+        self.PF, self.conjPF = _prepare_psf_fft(
+            psf,
+            self.full_shape,
+            bg_ring_frac=_WIENER_PSF_BG_RING_FRAC,
+            taper_outer_frac=_WIENER_PSF_TAPER_OUTER_FRAC,
+            taper_end_frac=_WIENER_PSF_TAPER_END_FRAC,
+            preprocess_fn=psf_preprocess,
+            condition_fn=condition_psf,
+            padding_fn=padding,
+        )
         self.conj_psf_F: "backend.xp.ndarray" = self.conjPF  # alias used by deblur
         self.psf_F2: "backend.xp.ndarray" = backend._freeze(backend.xp.abs(self.PF) ** 2)
 
@@ -508,6 +504,7 @@ def wiener_deblur(
         Deblurred image, float32, shape (H, W) matching the original
         image field of view.
     """
-    init_kw   = {k: v for k, v in kwargs.items() if k in WienerDeconv._INIT_KEYS}
-    deblur_kw = {k: v for k, v in kwargs.items() if k not in WienerDeconv._INIT_KEYS}
+    init_kw, deblur_kw = _split_init_and_deblur_kwargs(
+        WienerDeconv._INIT_KEYS, kwargs
+    )
     return WienerDeconv(image=image, psf=psf, **init_kw).deblur(**deblur_kw)

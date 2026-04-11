@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -41,6 +41,91 @@ from ._common import (
 )
 
 logger = logging.getLogger(__name__)
+
+_ITERATIVE_PSF_BG_RING_FRAC: float = 0.15
+_ITERATIVE_PSF_TAPER_OUTER_FRAC: float = 0.20
+_ITERATIVE_PSF_TAPER_END_FRAC: float = 0.50
+
+_WIENER_PSF_BG_RING_FRAC: float = 0.15
+_WIENER_PSF_TAPER_OUTER_FRAC: float = 0.90
+_WIENER_PSF_TAPER_END_FRAC: float = 1.0
+
+
+def _split_init_and_deblur_kwargs(
+    init_keys: frozenset[str],
+    kwargs: dict,
+) -> tuple[dict, dict]:
+    """
+    Split wrapper kwargs into constructor kwargs and deblur kwargs.
+
+    Parameters
+    ----------
+    init_keys : frozenset[str]
+        Names routed to the constructor.
+    kwargs : dict
+        Wrapper kwargs supplied by the caller.
+
+    Returns
+    -------
+    tuple[dict, dict]
+        ``(init_kw, deblur_kw)`` where unknown keys remain in ``deblur_kw``.
+    """
+    init_kw = {k: v for k, v in kwargs.items() if k in init_keys}
+    deblur_kw = {k: v for k, v in kwargs.items() if k not in init_keys}
+    return init_kw, deblur_kw
+
+
+def _prepare_psf_fft(
+    psf: np.ndarray,
+    full_shape: tuple[int, int],
+    *,
+    bg_ring_frac: float,
+    taper_outer_frac: float,
+    taper_end_frac: float,
+    preprocess_fn: Optional[Callable] = None,
+    condition_fn: Optional[Callable] = None,
+    padding_fn: Optional[Callable] = None,
+) -> tuple["backend.xp.ndarray", "backend.xp.ndarray"]:
+    """
+    Prepare the PSF spectrum on the padded FFT canvas.
+
+    Applies the current package-default preprocessing pipeline:
+    COM centering, negative clipping, odd-shape enforcement, conditioning,
+    zero-padding, `ifftshift`, and `rfft2`.
+    """
+    if preprocess_fn is None:
+        preprocess_fn = psf_preprocess
+    if condition_fn is None:
+        condition_fn = condition_psf
+    if padding_fn is None:
+        padding_fn = padding
+
+    psf_np: np.ndarray = preprocess_fn(
+        psf=psf,
+        center_method="com",
+        remove_negatives="clip",
+        eps=1e-12,
+        enforce_odd_shape=True,
+    )
+    psf_np = condition_fn(
+        psf=psf_np,
+        bg_ring_frac=bg_ring_frac,
+        taper_outer_frac=taper_outer_frac,
+        taper_end_frac=taper_end_frac,
+    )
+    psf_pad: "backend.xp.ndarray" = backend.xp.array(
+        padding_fn(
+            image=psf_np,
+            full_size=full_shape,
+            Type="Zero",
+            apply_taper=False,
+        ),
+        dtype=backend.xp.float32,
+    )
+    psf_pad = backend.ifftshift(psf_pad)
+    PF = backend._freeze(backend.rfft2(psf_pad))
+    conjPF = backend._freeze(PF.conj())
+    return PF, conjPF
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -257,48 +342,16 @@ class DeconvBase(ABC):
 
         # ── Step 10: PSF frequency-domain preparation ─────────────────────
 
-        # a) Centre (centre-of-mass), clip negatives, enforce odd shape.
-        psf_np: np.ndarray = psf_preprocess(
-            psf=psf,
-            center_method="com",
-            remove_negatives="clip",
-            eps=1e-12,
-            enforce_odd_shape=True,
+        # a–e) Centre (centre-of-mass), clip negatives, enforce odd shape,
+        #      condition PSF tails, zero-pad, ifftshift, then compute the
+        #      frozen PSF spectrum and its conjugate.
+        self.PF, self.conjPF = _prepare_psf_fft(
+            psf,
+            self.full_shape,
+            bg_ring_frac=_ITERATIVE_PSF_BG_RING_FRAC,
+            taper_outer_frac=_ITERATIVE_PSF_TAPER_OUTER_FRAC,
+            taper_end_frac=_ITERATIVE_PSF_TAPER_END_FRAC,
         )
-
-        # b) Condition PSF tails: subtract residual background, apply outer
-        #    radial taper to suppress measurement noise in the wings.
-        psf_np = condition_psf(
-            psf=psf_np,
-            bg_ring_frac=0.15,
-            taper_outer_frac=0.20,
-            taper_end_frac=0.50,
-        )
-
-        # c) Zero-pad to FFT canvas size.
-        #    IMPORTANT: no edge extension and no taper on the PSF.  The PSF
-        #    must satisfy Σh = 1 (energy conservation); any non-zero padding
-        #    or tapering would violate photometric consistency.
-        psf_pad: "backend.xp.ndarray" = backend.xp.array(
-            padding(
-                image=psf_np,
-                full_size=self.full_shape,
-                Type="Zero",
-                apply_taper=False,
-            ),
-            dtype=backend.xp.float32,
-        )
-
-        # d) ifftshift: move the PSF centre from the array centre to [0, 0].
-        #    This makes FFT-based convolution equivalent to centred linear
-        #    convolution without introducing a phase ramp.
-        psf_pad = backend.ifftshift(psf_pad)
-
-        # e) Compute and freeze the PSF spectrum and its conjugate.
-        #    H(f)  = FFT(h)       — forward model in the frequency domain
-        #    H*(f) = conj(H(f))   — correlation (adjoint) operator
-        self.PF: "backend.xp.ndarray" = backend._freeze(backend.rfft2(psf_pad))
-        self.conjPF: "backend.xp.ndarray" = backend._freeze(self.PF.conj())
 
         # ── Step 11: Precompute H^T M with relative floor clamp ───────────
         # H^T M = irfft2(H*(f) · F[M]) measures, at each pixel, how much

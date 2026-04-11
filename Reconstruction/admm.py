@@ -97,7 +97,7 @@ from typing import Optional
 import numpy as np
 
 from . import _backend as backend
-from ._base import DeconvBase
+from ._base import DeconvBase, _split_init_and_deblur_kwargs
 from ._tv_operators import forward_grad_periodic, backward_div_periodic
 
 logger = logging.getLogger(__name__)
@@ -874,8 +874,9 @@ def admm_deblur(
     np.ndarray
         Deconvolved image.
     """
-    init_kw = {k: v for k, v in kwargs.items() if k in ADMMDeconv._INIT_KEYS}
-    deblur_kw = {k: v for k, v in kwargs.items() if k not in ADMMDeconv._INIT_KEYS}
+    init_kw, deblur_kw = _split_init_and_deblur_kwargs(
+        ADMMDeconv._INIT_KEYS, kwargs
+    )
     return ADMMDeconv(image, psf, **init_kw).deblur(
         num_iter=iters, lambda_tv=lambda_tv, **deblur_kw
     )
