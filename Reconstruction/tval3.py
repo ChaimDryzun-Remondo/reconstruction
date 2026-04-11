@@ -209,6 +209,17 @@ class TVAL3Deconv(DeconvBase):
             backend.xp.real(self.H_conj_full * self.H_full).copy()
         )
 
+        # ── F6: cache float64 mask/image views for the data-fidelity term ──
+        # self.mask / self.image are frozen after DeconvBase.__init__, so
+        # casting them once here avoids one full-canvas float64 allocation
+        # per deblur() call plus two more per iteration inside _compute_cost.
+        self._mask_f64: "backend.xp.ndarray" = backend._freeze(
+            self.mask.astype(backend.xp.float64)
+        )
+        self._image_f64: "backend.xp.ndarray" = backend._freeze(
+            self.image.astype(backend.xp.float64)
+        )
+
         # ── Laplacian eigenvalue tensor (periodic BC) ──────────────────────
         # lap_fft[k,l] = 4 − 2cos(2πk/M) − 2cos(2πl/N)
         # These are the eigenvalues of G^TG for the forward-difference gradient
@@ -338,9 +349,9 @@ class TVAL3Deconv(DeconvBase):
         -------
         float
         """
-        mask_f64 = self.mask.astype(backend.xp.float64)
-        y_f64 = self.image.astype(backend.xp.float64)
-        data_term = 0.5 * float(backend.xp.sum((mask_f64 * (Hx - y_f64)) ** 2))
+        data_term = 0.5 * float(
+            backend.xp.sum((self._mask_f64 * (Hx - self._image_f64)) ** 2)
+        )
         if tvnorm == 1:
             tv_term = float(
                 backend.xp.sum(backend.xp.abs(w_h))
@@ -482,8 +493,9 @@ class TVAL3Deconv(DeconvBase):
 
         # ── Initialise state in float64 ────────────────────────────────────
         u: "backend.xp.ndarray" = self.estimated_image.astype(backend.xp.float64).copy()
-        mask_f64: "backend.xp.ndarray" = self.mask.astype(backend.xp.float64)
-        y_f64: "backend.xp.ndarray" = self.image.astype(backend.xp.float64)
+        # F6: mask/image float64 casts are cached on self in __init__.
+        mask_f64 = self._mask_f64
+        y_f64 = self._image_f64
 
         # Initial forward pass and gradient
         Hx_k: "backend.xp.ndarray" = backend.xp.real(
