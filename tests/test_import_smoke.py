@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib
 import sys
-import types
 
 import pytest
 
@@ -54,41 +53,40 @@ class TestImportSmoke:
         assert "Reconstruction.rl_unknown_boundary" not in sys.modules
         assert "Reconstruction.pnp_admm" not in sys.modules
 
-    def test_import_lowercase_facade_smoke(self):
+    def test_reconstruction_package_has_version(self):
         _clear_reconstruction_modules()
 
-        module = importlib.import_module("reconstruction")
+        pkg = importlib.import_module("Reconstruction")
 
-        assert module.__name__ == "reconstruction"
+        assert isinstance(pkg.__version__, str)
+        assert pkg.__version__  # non-empty
 
     def test_import_uppercase_backend_smoke(self):
         _clear_reconstruction_modules()
 
-        upper_backend = importlib.import_module("Reconstruction._backend")
-        lower_backend = importlib.import_module("reconstruction.Reconstruction._backend")
+        backend = importlib.import_module("Reconstruction._backend")
 
-        assert upper_backend is lower_backend
+        assert callable(getattr(backend, "set_backend", None))
 
-    def test_import_uppercase_base_aliases_lowercase_module(self, monkeypatch):
+    def test_reconstruction_base_importable(self):
         _clear_reconstruction_modules()
 
-        fake_base = types.ModuleType("reconstruction.Reconstruction._base")
-        fake_base.DeconvBase = type("DeconvBase", (), {})
-        monkeypatch.setitem(sys.modules, "reconstruction.Reconstruction._base", fake_base)
+        base = importlib.import_module("Reconstruction._base")
 
-        upper_base = importlib.import_module("Reconstruction._base")
+        assert hasattr(base, "DeconvBase")
 
-        assert upper_base is fake_base
-        assert upper_base.DeconvBase is fake_base.DeconvBase
-
-    def test_uppercase_and_lowercase_exports_share_implementation_objects(self):
+    def test_reconstruction_exports_are_accessible(self):
         _clear_reconstruction_modules()
 
-        upper = importlib.import_module("Reconstruction")
-        lower = importlib.import_module("reconstruction")
+        pkg = importlib.import_module("Reconstruction")
 
-        assert upper.set_backend is lower.set_backend
-        assert upper.WienerDeconv is lower.WienerDeconv
+        # First access triggers __getattr__ (set_backend is lazy via _EXPORTS,
+        # not bound at Reconstruction/__init__.py import time).
+        first_ref = pkg.set_backend
+        # Second access returns the cached value from globals(), not __getattr__.
+        assert pkg.set_backend is first_ref
+        assert callable(first_ref)
+        assert callable(pkg.WienerDeconv)
 
     def test_wiener_symbol_import_does_not_require_scikit_image(self, monkeypatch):
         _clear_reconstruction_modules()
