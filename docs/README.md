@@ -143,9 +143,10 @@ The package currently has two distinct calling contracts:
 
 The items below landed as one atomic commit per finding in a single
 refactor pass.  Each commit ran the full pytest suite with no
-regression — the count stayed at **652 passed, 4 pre-existing facade
-failures unchanged** on every step.  See the "Known pre-existing
-failures" note under *Running Tests* for the 4 unrelated failures.
+regression — the count stayed at **652 passed** on every step, with
+4 pre-existing facade test failures that were resolved in a subsequent
+dedicated pass; see `tests/test_import_smoke.py` and the
+*Import entry point* section below.
 
 ### Correctness bugs (P0)
 
@@ -280,44 +281,16 @@ parent repo root, which shadows the submodule's inner `Reconstruction/`
 package with any `Reconstruction/` directory that happens to exist at
 the parent level.  `importlib` mode bypasses the walk.
 
-### Known pre-existing facade failures
+### Import entry point
 
-Four tests in `tests/test_import_smoke.py` fail on this branch and on
-`main` alike.  They are unrelated to any refactor committed here and
-exercise a lowercase-facade dual-import contract that the commit
-`0ead10c` submodule rename (`reconstruction` → `external_reconstruction`)
-left stranded:
+`import Reconstruction` is the sole supported top-level entry point.
+Bare `import reconstruction` (lowercase) is not supported.
 
-- `test_import_lowercase_facade_smoke`
-- `test_import_uppercase_backend_smoke`
-- `test_import_uppercase_base_aliases_lowercase_module`
-- `test_uppercase_and_lowercase_exports_share_implementation_objects`
-
-All four require `import reconstruction` (bare lowercase) to resolve
-to the same underlying module objects as `import Reconstruction`, so
-that monkey-patching either name affects the other.  The facade was
-designed around a physical directory named `reconstruction/` (before
-the rename); after the rename, `import reconstruction` has no target
-on `sys.path`.  The facade file at
-[`external_reconstruction/__init__.py`](../__init__.py) was intended
-to provide the dotted path `RemondoPythonCore.reconstruction`, not the
-bare lowercase name the tests require.
-
-Fixing these four is architectural, not a test rewrite:
-
-- **Option A** — install the submodule via
-  `pip install -e ./external_reconstruction` from the parent.  The
-  submodule's [`pyproject.toml`](../pyproject.toml) already declares
-  `name = "reconstruction"`, but additional setup is needed for the
-  dotted `reconstruction.Reconstruction._base` path the tests use.
-- **Option B** — create a physical `reconstruction/` shim package at
-  the parent repo root, case-colliding with `Reconstruction/` on
-  Windows.  Fragile.
-- **Option C** — add `sys.modules` aliasing in `tests/conftest.py`.
-  Works for tests specifically; arguably a test-harness fix.
-- **Option D** — update the four tests to match the post-rename
-  reality (only `Reconstruction` is a valid top-level name).
-
-This refactor does not take any of these options.  The four failures
-are documented in the submodule `CLAUDE.md` and should be resolved
-in a dedicated pass.
+The commit `0ead10c` renamed the submodule directory
+`reconstruction/` → `external_reconstruction/`, retiring the
+lowercase-facade dual-import contract that earlier tests encoded.
+Those four tests were rewritten in a subsequent dedicated pass
+(see `tests/test_import_smoke.py`) to assert real properties of the
+current package layout.  The `external_reconstruction/__init__.py`
+facade continues to serve the dotted path
+`RemondoPythonCore.reconstruction` for parent-package consumers.
