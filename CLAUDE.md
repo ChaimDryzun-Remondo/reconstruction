@@ -154,3 +154,34 @@ implementing):
   (only `Reconstruction` is a valid top-level name; the lowercase
   facade is retired).  Requires explicit approval because it changes
   an architectural contract the tests encode.
+
+## Active session scope: facade test architectural fix
+
+This session is authorized to modify `tests/` — specifically the 4 pre-existing
+facade failures in `test_import_smoke.py` and any adjacent test infrastructure
+needed to implement the chosen fix. All other hard rules remain in force.
+
+Additional scope for this session:
+- May add new tests, remove obsolete tests, or restructure test files when
+  required by the chosen architectural option.
+- May modify `Reconstruction/__init__.py`, package-level re-exports, and
+  facade-layer code if the chosen option requires it.
+- May NOT modify algorithm implementations (Wiener, RL, ADMM, CP, FISTA,
+  TVAL3, RED, PnP, Landweber) — those are out of scope for this pass.
+- May NOT modify any test that currently passes without first showing me
+  the diff, the rationale, and waiting for explicit approval.
+
+Process for this session:
+- Phase 1: Re-read the facade failure documentation in docs/README.md and
+  CLAUDE.md (options A–D). Summarize each option with its tradeoffs.
+  Recommend one, but do NOT proceed.
+- Phase 2: After I pick an option, produce an atomic step-by-step plan.
+  Each step must be independently revertible.
+- Phase 3: Implement one step at a time. Show diff, wait for approval,
+  apply, run full test suite, report results verbatim.
+- Target baseline: 656 passed (current 652 + 4 recovered), 0 failed.
+  Any regression from 652 is a stop condition.
+- Commit per step with conventional-commit message (fix: / refactor: / test:).
+
+This session scope is removed at session end. Revert to the base working
+agreement for any subsequent session.
