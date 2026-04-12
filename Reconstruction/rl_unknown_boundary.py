@@ -116,7 +116,7 @@ class RLUnknownBoundary(DeconvBase):
         for k in range(num_iter):
 
             # ── Step 1: Forward model H x_k ──────────────────────────────
-            with backend.xp.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            with backend.errstate(over="ignore", invalid="ignore", divide="ignore"):
                 Hx_k = backend.irfft2(PF * backend.rfft2(x_k), s=fshape)
 
             # ── Step 2: Ratio on observed support Ω ──────────────────────
@@ -124,11 +124,11 @@ class RLUnknownBoundary(DeconvBase):
             ratio = (M * y) / ((Hx_k * M) + ((1.0 - M) + eps_dev))
 
             # ── Step 3: Back-projection H^T ratio ────────────────────────
-            with backend.xp.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            with backend.errstate(over="ignore", invalid="ignore", divide="ignore"):
                 back = backend.irfft2(conjPF * backend.rfft2(ratio), s=fshape)
 
             # ── Step 4: Mask-normalised RL update ────────────────────────
-            with backend.xp.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            with backend.errstate(over="ignore", invalid="ignore", divide="ignore"):
                 x_new = x_k * (back / (HTM + eps_dev))
 
             # ── Step 5: Optional multiplicative TV correction ─────────────

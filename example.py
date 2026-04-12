@@ -39,7 +39,7 @@ from scipy.signal import fftconvolve
 from RemondoPythonCore.Common.Image_Preprocessing import to_grayscale, image_normalization
 from RemondoPythonCore.Common.General_Utilities import odd_crop_around_center
 
-from RemondoPythonCore.reconstruction import (
+from RemondoPythonCore.external_reconstruction import (
     WienerDeconv,
     RLUnknownBoundary,
     LandweberUnknownBoundary,
@@ -51,7 +51,7 @@ from RemondoPythonCore.reconstruction import (
 
 # Optional BM3D-based algorithms (require the `bm3d` package)
 try:
-    from RemondoPythonCore.reconstruction import PnPADMM, REDDeconv
+    from RemondoPythonCore.external_reconstruction import PnPADMM, REDDeconv
     _HAS_BM3D = True
 except ImportError:
     _HAS_BM3D = False
@@ -217,7 +217,7 @@ def run_rl_unknown_boundary(degraded: np.ndarray, psf: np.ndarray,
         padding_scale=cfg.padding_scale,
     )
     t0 = time.perf_counter()
-    result = solver.deblur(num_iter=cfg.num_iter * 5, lambda_tv=1e-3)
+    result = solver.deblur(num_iter=500, lambda_tv=1e-3)
     elapsed = time.perf_counter() - t0
     return Result("RL (Unknown Bnd.)", result, 0.0, 0.0, elapsed)
 
@@ -244,7 +244,7 @@ def run_rl_standard(degraded: np.ndarray, psf: np.ndarray,
             use_mask=False,
         )
         t0 = time.perf_counter()
-        result = solver.deblur(num_iter=cfg.num_iter*5, lambda_tv=1e-3)
+        result = solver.deblur(num_iter=500, lambda_tv=1e-3)
         elapsed = time.perf_counter() - t0
         return Result("RL (mask=False)", result, 0.0, 0.0, elapsed)
 
@@ -258,7 +258,7 @@ def run_landweber(degraded: np.ndarray, psf: np.ndarray,
         padding_scale=cfg.padding_scale,
     )
     t0 = time.perf_counter()
-    result = solver.deblur(num_iter=cfg.num_iter*5, lambda_tv=1e-3, precondition=True, adaptive_restart=True)
+    result = solver.deblur(num_iter=500, lambda_tv=1e-3, precondition=True, adaptive_restart=True)
     elapsed = time.perf_counter() - t0
     return Result("Landweber (FISTA)", result, 0.0, 0.0, elapsed)
 
@@ -272,7 +272,7 @@ def run_admm(degraded: np.ndarray, psf: np.ndarray,
         padding_scale=cfg.padding_scale,
     )
     t0 = time.perf_counter()
-    result = solver.deblur(num_iter=cfg.num_iter*5,  lambda_tv=0.01, TVnorm=2)
+    result = solver.deblur(num_iter=400,  lambda_tv=0.001, TVnorm=2)
     elapsed = time.perf_counter() - t0
     return Result("ADMM-TV", result, 0.0, 0.0, elapsed)
 
@@ -286,7 +286,7 @@ def run_tval3(degraded: np.ndarray, psf: np.ndarray,
         padding_scale=cfg.padding_scale,
     )
     t0 = time.perf_counter()
-    result = solver.deblur(num_iter=cfg.num_iter*5, lambda_tv=1e-2, adaptive_tv=True, burn_in_frac=0.2)
+    result = solver.deblur(num_iter=1500, lambda_tv=1e-3, adaptive_tv=True, burn_in_frac=0.2)
     elapsed = time.perf_counter() - t0
     return Result("TVAL3", result, 0.0, 0.0, elapsed)
 
@@ -300,7 +300,7 @@ def run_fista_tv(degraded: np.ndarray, psf: np.ndarray,
         padding_scale=cfg.padding_scale,
     )
     t0 = time.perf_counter()
-    result = solver.deblur(num_iter=cfg.num_iter*4, lambda_reg=1e-3, reg_mode="TV")
+    result = solver.deblur(num_iter=500, lambda_reg=1e-3, reg_mode="TV")
     elapsed = time.perf_counter() - t0
     return Result("FISTA (TV)", result, 0.0, 0.0, elapsed)
 
@@ -314,7 +314,7 @@ def run_chambolle_pock(degraded: np.ndarray, psf: np.ndarray,
         padding_scale=cfg.padding_scale,
     )
     t0 = time.perf_counter()
-    result = solver.deblur(num_iter=cfg.num_iter*4, lambda_tv=0.01)
+    result = solver.deblur(num_iter=120, lambda_tv=0.01)
     elapsed = time.perf_counter() - t0
     return Result("Chambolle-Pock", result, 0.0, 0.0, elapsed)
 
@@ -331,7 +331,7 @@ def run_pnp_admm(degraded: np.ndarray, psf: np.ndarray,
         padding_scale=cfg.padding_scale,
     )
     t0 = time.perf_counter()
-    result = solver.deblur(num_iter=min(cfg.num_iter, 30), lambda_tv=0.01, sigma_scale=1.0)  # BM3D is expensive
+    result = solver.deblur(num_iter=min(cfg.num_iter, 10), lambda_tv=0.01)  # BM3D is expensive
     elapsed = time.perf_counter() - t0
     return Result("PnP-ADMM (BM3D)", result, 0.0, 0.0, elapsed)
 
@@ -348,7 +348,7 @@ def run_red_admm(degraded: np.ndarray, psf: np.ndarray,
         padding_scale=cfg.padding_scale,
     )
     t0 = time.perf_counter()
-    result = solver.deblur(num_iter=min(cfg.num_iter, 30), lambda_reg=0.01, sigma=0.05)  # BM3D is expensive
+    result = solver.deblur(num_iter=min(cfg.num_iter, 10), lambda_reg=0.01)  # BM3D is expensive
     elapsed = time.perf_counter() - t0
     return Result("RED-ADMM (BM3D)", result, 0.0, 0.0, elapsed)
 
@@ -400,8 +400,8 @@ def display_results(ground_truth: np.ndarray,
         fontsize=14, fontweight="bold", y=1.01,
     )
     plt.tight_layout()
-    plt.savefig("reconstruction_comparison.png", dpi=150, bbox_inches="tight")
-    logger.info("Figure saved to reconstruction_comparison.png")
+    #plt.savefig("reconstruction_comparison.png", dpi=150, bbox_inches="tight")
+    #logger.info("Figure saved to reconstruction_comparison.png")
     plt.show()
 
 

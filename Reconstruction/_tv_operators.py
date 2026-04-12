@@ -342,20 +342,20 @@ def tv_multiplicative_correction(
     [1] Dey et al., Microscopy Research and Technique, 2006, Eq. (5).
     """
     # ── Discrete gradient (forward differences, Neumann BC) ───────────────
-    with backend.xp.errstate(over="ignore", invalid="ignore", divide="ignore"):
+    with backend.errstate(over="ignore", invalid="ignore", divide="ignore"):
         dh, dw = forward_grad(x)
 
     # ── Smoothed gradient magnitude ───────────────────────────────────────
     # The ε² term prevents division by zero where ∇x ≈ 0 (flat regions).
     # This is standard in TV implementations and corresponds to the Huber
     # approximation of the L1 norm near the origin.
-    with backend.xp.errstate(over="ignore", invalid="ignore", divide="ignore"):
+    with backend.errstate(over="ignore", invalid="ignore", divide="ignore"):
         mag = backend.xp.sqrt(dh * dh + dw * dw + eps_grad * eps_grad)
 
     # ── Normalized gradient field  n = ∇x / |∇x|_ε ──────────────────────
     # In flat regions, mag ≈ eps_grad and (dh, dw) ≈ 0, so n ≈ 0 —
     # the regularization has no effect there, as desired.
-    with backend.xp.errstate(over="ignore", invalid="ignore", divide="ignore"):
+    with backend.errstate(over="ignore", invalid="ignore", divide="ignore"):
         nh = dh / mag
         nw = dw / mag
     # dh, dw, mag are no longer needed; allow garbage collection.

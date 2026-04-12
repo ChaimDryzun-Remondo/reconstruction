@@ -535,7 +535,7 @@ class DeconvBase(ABC):
             x_k, name="final iterate", last_finite=last_finite
         )
         self.estimated_image = x_k.copy()
-        result = backend._to_numpy(cropping(x_k, (self.h, self.w)))
+        result = cropping(backend._to_numpy(x_k), (self.h, self.w))
         if not bool(np.isfinite(result).all()):
             self._restore_last_finite_state(last_finite)
             logger.warning("Non-finite values detected in cropped return array.")
