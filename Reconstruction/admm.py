@@ -98,7 +98,7 @@ import numpy as np
 
 from . import _backend as backend
 from ._base import DeconvBase, _split_init_and_deblur_kwargs
-from ._tv_operators import forward_grad_periodic, backward_div_periodic
+from ._tv_operators import backward_div_periodic, forward_grad_periodic, shrink_tv
 
 logger = logging.getLogger(__name__)
 
@@ -214,9 +214,27 @@ class ADMMDeconv(DeconvBase):
 
         H_full = backend.fft2(psf_spatial)
         self.H_full: "backend.xp.ndarray" = backend._freeze(H_full)
-        self.H_conj_full: "backend.xp.ndarray" = backend._freeze(H_full.conj().copy())
+        # F8: ``H_full.conj()`` on a complex array already allocates a fresh
+        # buffer (verified: ``a.conj() is a`` is False and ``owndata`` is
+        # True), so the trailing ``.copy()`` here was redundant.  The
+        # ``.copy()`` below is kept: ``xp.real(complex_array)`` is a view
+        # with ``owndata=False``, and copying it releases the full complex
+        # intermediate instead of holding it alive as ``.base``.
+        self.H_conj_full: "backend.xp.ndarray" = backend._freeze(H_full.conj())
         self.H_H_conj: "backend.xp.ndarray" = backend._freeze(
             backend.xp.real(self.H_conj_full * self.H_full).copy()
+        )
+
+        # ── F6: cache float64 mask/image views for the data-fidelity term ──
+        # self.mask / self.image are frozen after DeconvBase.__init__, so
+        # casting them once here avoids one full-canvas float64 allocation
+        # per deblur() call (in the setup block below) plus two more per
+        # iteration inside _compute_admm_cost.
+        self._mask_f64: "backend.xp.ndarray" = backend._freeze(
+            self.mask.astype(backend.xp.float64)
+        )
+        self._image_f64: "backend.xp.ndarray" = backend._freeze(
+            self.image.astype(backend.xp.float64)
         )
 
         # ── Laplacian eigenvalue tensor (periodic BC) ──────────────────────
@@ -391,30 +409,12 @@ class ADMMDeconv(DeconvBase):
         """
         Shrinkage / vectorial soft-thresholding.
 
-        Parameters
-        ----------
-        x, y : xp.ndarray
-            Horizontal and vertical gradient components.
-        thresh : float or xp.ndarray
-            Uniform threshold (scalar).
-        eps : float
-            Denominator floor for TVnorm=2 (isotropic).
-        tvnorm : int
-            1 for anisotropic componentwise, 2 for isotropic vectorial.
-
-        Returns
-        -------
-        (x_s, y_s) : tuple[xp.ndarray, xp.ndarray]
+        F14: the body lives in ``_tv_operators.shrink_tv`` (shared with
+        TVAL3).  This thin wrapper is retained so the numerical-failure
+        contract tests can still monkey-patch ``solver._shrink`` as a
+        fault-injection seam.
         """
-        if tvnorm == 1:
-            return (
-                backend.xp.sign(x) * backend.xp.maximum(backend.xp.abs(x) - thresh, 0.0),
-                backend.xp.sign(y) * backend.xp.maximum(backend.xp.abs(y) - thresh, 0.0),
-            )
-        else:
-            mag = backend.xp.sqrt(x * x + y * y)
-            scale = backend.xp.maximum(mag - thresh, 0.0) / (mag + eps)
-            return scale * x, scale * y
+        return shrink_tv(x, y, thresh, eps, tvnorm)
 
     def _compute_admm_cost(
         self,
@@ -444,9 +444,9 @@ class ADMMDeconv(DeconvBase):
         -------
         float
         """
-        mask_f64 = self.mask.astype(backend.xp.float64)
-        y_f64 = self.image.astype(backend.xp.float64)
-        data_term = 0.5 * float(backend.xp.sum((mask_f64 * (Hx - y_f64)) ** 2))
+        data_term = 0.5 * float(
+            backend.xp.sum((self._mask_f64 * (Hx - self._image_f64)) ** 2)
+        )
 
         w_h = state.get("w_h")
         w_w = state.get("w_w")
@@ -601,8 +601,9 @@ class ADMMDeconv(DeconvBase):
 
         # ── Initialise state in float64 ────────────────────────────────────
         u: "backend.xp.ndarray" = self.estimated_image.astype(backend.xp.float64).copy()
-        mask_f64: "backend.xp.ndarray" = self.mask.astype(backend.xp.float64)
-        y_f64: "backend.xp.ndarray" = self.image.astype(backend.xp.float64)
+        # F6: mask/image float64 casts are cached on self in __init__.
+        mask_f64 = self._mask_f64
+        y_f64 = self._image_f64
 
         # Initial forward pass
         Hx_k: "backend.xp.ndarray" = backend.xp.real(
@@ -648,13 +649,11 @@ class ADMMDeconv(DeconvBase):
             prior_rhs: "backend.xp.ndarray" = self._prior_update(
                 u, state, lambda_tv, rho_w, _EPS_GRAD
             )
-            for key, value in state.items():
-                self._fail_on_nonfinite(
-                    backend.xp.asarray(value),
-                    name=f"ADMM prior state ({key})",
-                    iteration=k,
-                    last_finite=last_finite,
-                )
+            # F4: the prior_rhs check below is a strict superset of the
+            # state-dict sweep that used to sit here — prior_rhs is built
+            # from state entries by local/linear operations, so NaN anywhere
+            # in state propagates to prior_rhs.  Drop the per-key sweep (4
+            # full-canvas reductions per iteration on the default TV path).
             self._fail_on_nonfinite(
                 prior_rhs,
                 name="ADMM prior RHS",
@@ -683,7 +682,11 @@ class ADMMDeconv(DeconvBase):
                 iteration=k,
                 last_finite=last_finite,
             )
-            u = backend.xp.real(backend.ifft2(backend.fft2(rhs) / (denom + eps)))
+            # F5: keep the x-update spectrum U around so the forward
+            # projection below can reuse it when the positivity projection
+            # is off (u is a pure real-valued ifft2 of U, so fft2(u) == U).
+            U = backend.fft2(rhs) / (denom + eps)
+            u = backend.xp.real(backend.ifft2(U))
 
             # ── Step 4: NaN/Inf guard ──────────────────────────────────────
             self._fail_on_nonfinite(
@@ -693,7 +696,7 @@ class ADMMDeconv(DeconvBase):
                 last_finite=last_finite,
             )
 
-            # Positivity projection
+            # Positivity projection (mutates u, invalidating the cached U).
             if _nonneg:
                 u = backend.xp.maximum(u, eps_pos)
                 self._fail_on_nonfinite(
@@ -704,7 +707,13 @@ class ADMMDeconv(DeconvBase):
                 )
 
             # ── Step 5: Recompute Hx with new u ───────────────────────────
-            Hx_k = backend.xp.real(backend.ifft2(self.H_full * backend.fft2(u)))
+            if _nonneg:
+                Hx_k = backend.xp.real(
+                    backend.ifft2(self.H_full * backend.fft2(u))
+                )
+            else:
+                # F5: reuse the cached spectrum — one fft2 saved per iter.
+                Hx_k = backend.xp.real(backend.ifft2(self.H_full * U))
             self._fail_on_nonfinite(
                 Hx_k,
                 name="ADMM forward projection",

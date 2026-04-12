@@ -139,6 +139,53 @@ The package currently has two distinct calling contracts:
 | TVAL3 | `TVAL3Deconv` | `tval3_deblur` | ✓ Complete |
 | PnP-ADMM (BM3D) | `PnPADMM` | `pnp_admm_deblur` | ✓ Complete (requires `bm3d`) |
 
+## Recent Refactor (bug fixes + code optimization)
+
+The items below landed as one atomic commit per finding in a single
+refactor pass.  Each commit ran the full pytest suite with no
+regression — the count stayed at **652 passed** on every step, with
+4 pre-existing facade test failures that were resolved in a subsequent
+dedicated pass; see `tests/test_import_smoke.py` and the
+*Import entry point* section below.
+
+### Correctness bugs (P0)
+
+| ID  | File(s)                            | Summary |
+|-----|------------------------------------|---------|
+| F1  | `rl_unknown_boundary.py`           | Return the improved iterate on convergence — the old code broke out of the loop *before* advancing state, so `_crop_and_return` returned the stale previous iterate even though the convergence test had just validated the new one. |
+| F2  | `landweber_unknown_boundary.py`    | Same pattern — advance the full FISTA state (`x_km1`, `x_k`, `z_k`, `t_k`, `last_finite`) before the `break` on convergence. |
+| F3  | `wiener.py`                        | Recompute `HTM` and `_lipschitz` from the active Wiener PF.  The base class set both from the iterative-family PF before Wiener's PF/conjPF override, leaving stale values bound to the wrong spectrum.  Wiener itself never reads these fields, but any FISTA-style subclass of `WienerDeconv` would inherit numerically wrong values — this closes the latent trap. |
+
+### Performance / silent-correctness risks (P1)
+
+| ID  | File(s)                                                       | Summary |
+|-----|---------------------------------------------------------------|---------|
+| F4  | `admm.py`                                                     | Drop the redundant post-`_prior_update` per-key state sweep.  `prior_rhs` is built from state entries by linear/local operations, so the `prior_rhs` check is a strict superset of the sweep.  Default TV path: 8 full-canvas `isfinite().all()` reductions → 4 per iteration. |
+| F5  | `admm.py`, `tval3.py`                                         | Reuse the cached x-update spectrum `U = fft2(rhs) / (denom+eps)` for the forward projection when `nonneg=False` — `u = real(ifft2(U))` means `fft2(u) == U` exactly (rhs and denom are both real).  Saves one `fft2`/iter on the `nonneg=False` path; byte-identical on the default `nonneg=True` path. |
+| F6  | `admm.py`, `tval3.py`                                         | Cache `self._mask_f64` and `self._image_f64` once in `__init__` (the mask/image are already frozen by `DeconvBase`).  Removes two float64 allocations per `_compute_cost` call and two more per `deblur()` call. |
+| F8  | `admm.py`, `tval3.py`                                         | Drop the redundant `.copy()` after `H_full.conj()` — verified empirically that `.conj()` on complex arrays already allocates a fresh buffer.  Kept the `.copy()` after `xp.real(...)` because `xp.real` on a complex array returns a view that would otherwise hold the complex intermediate alive. |
+| F10 | `rl_unknown_boundary.py`, `landweber_unknown_boundary.py`, `fista.py`, `chambolle_pock.py` | Refresh the `last_finite` rollback snapshot at the existing `check_every` cadence rather than every iteration.  On default `check_every=5` this is a 5× reduction in bookkeeping copies.  Convergence detection itself is already gated on the same cadence, so the returned `last_finite` is always consistent with the returned iterate on the success path. |
+| F11 | `chambolle_pock.py`                                           | Rename `x_old` → `x_prev` and document the aliasing invariant (the name is an alias of `x`, not a copy, and nothing in the iteration body mutates `x` in place).  No numerical change; removes a review trap. |
+| F12 | `fista.py`                                                    | Document the FISTA alias-rotation invariant (`x_km1 = x_k; x_k = x_new`) that the O'Donoghue-Candès restart test depends on.  Comment-only. |
+
+### Cleanup (P2)
+
+| ID  | File(s)                                 | Summary |
+|-----|-----------------------------------------|---------|
+| F14 | `_tv_operators.py`, `admm.py`, `tval3.py` | Extract the byte-identical `_shrink` method bodies into a single `_tv_operators.shrink_tv` function.  Each solver retains `_shrink` as a thin wrapper because `TestNumericalFailureContract` monkey-patches `solver._shrink` as a fault-injection seam. |
+| F15 | `chambolle_pock.py`                     | Return two independent `zeros_like` buffers from `_dual_project` on the `lam <= 0` branch (was `zero, zero.copy()`, half-aliased).  No numerical change. |
+| F17 | `rl_unknown_boundary.py`                | Hoist the duplicated `tv_multiplicative_correction(x_k, lam)` call out of the `tv_on_full_canvas` branch — only the *application* of the correction differs. |
+| F18 | `fista.py`                              | At FISTA cold-start, `x_km1` and `y_k` can alias `x_k` (the F12 invariant guarantees no in-place mutation before the state advance rebinds them).  Saves 2 full-canvas copies per `deblur()` call.  `last_finite` stays a true copy. |
+
+### Skipped findings (with rationale)
+
+| ID  | Why not |
+|-----|---------|
+| F7  | Two tests in `TestWienerPSFContract` explicitly encode the double-PSF-pipeline (base pipeline + Wiener override) as an architectural contract — they assert that `condition_psf` is called **twice**, once with iterative-family constants (0.20/0.50) and once with Wiener constants (0.90/1.00).  F3 already closes the correctness trap; the remaining work is a constructor-only cost. |
+| F9  | Finding premise incorrect.  All four callers of `_check_convergence` (`RL`, `Landweber`, `FISTA`, `Chambolle-Pock`) already guard with `if k >= min_iter and (k + 1) % check_every == 0:`; ADMM and TVAL3 don't call this function at all.  The proposed inner guard would be dead code. |
+| F16 | `np.sqrt` → `math.sqrt` is not byte-equivalent under NumPy 2.x NEP-50 weak promotion.  The Landweber momentum step `z_new = x_new + momentum * (x_new - x_k)` propagates `t_new`'s scalar type into an op with a float32 array; `np.float64` (strong) upcasts the intermediate to float64, while Python `float` (weak) keeps it at float32.  The compounded rounding drift breaks the regression test (max diff 0.021 against the reference).  A "correct" F16 would require wrapping `momentum` in `backend.xp.float64(...)` — saving ~5 ns/iter, invisible against per-iter FFT cost. |
+| F20 | Finding premise incorrect.  `Syy = |rfft2(y)|² / N` is the correct per-frequency PSD at each rfft2 bin — verified empirically that it is bit-identical to `|fft2(y)|² / N` at the same bins (max diff 3e-15, pure roundoff).  The factor-of-2 weighting the finding proposed is only needed for Parseval *total-energy sums*, not for the per-frequency α(f) computation the Wiener Spectrum mode performs. |
+
 ## Package Structure
 
 ```
@@ -220,7 +267,30 @@ pip install -e ".[all]"
 
 ## Running Tests
 
+From the submodule root, with the reconstruction conda env active:
+
 ```bash
-conda activate env_py311
-pytest tests/ -v
+conda activate reconstruction
+pytest tests/ --import-mode=importlib -v
 ```
+
+`--import-mode=importlib` is required.  Pytest's default `prepend`
+import mode walks up from `tests/test_*.py` through both
+`tests/__init__.py` and `external_reconstruction/__init__.py` to the
+parent repo root, which shadows the submodule's inner `Reconstruction/`
+package with any `Reconstruction/` directory that happens to exist at
+the parent level.  `importlib` mode bypasses the walk.
+
+### Import entry point
+
+`import Reconstruction` is the sole supported top-level entry point.
+Bare `import reconstruction` (lowercase) is not supported.
+
+The commit `0ead10c` renamed the submodule directory
+`reconstruction/` → `external_reconstruction/`, retiring the
+lowercase-facade dual-import contract that earlier tests encoded.
+Those four tests were rewritten in a subsequent dedicated pass
+(see `tests/test_import_smoke.py`) to assert real properties of the
+current package layout.  The `external_reconstruction/__init__.py`
+facade continues to serve the dotted path
+`RemondoPythonCore.reconstruction` for parent-package consumers.

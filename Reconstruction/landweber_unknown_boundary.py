@@ -275,19 +275,27 @@ class LandweberUnknownBoundary(DeconvBase):
             )
 
             # ── Convergence check ─────────────────────────────────────────
+            converged = False
             if k >= min_iter and (k + 1) % check_every == 0:
                 _, converged = self._check_convergence(
                     x_new, x_k, k=k, num_iter=num_iter, tol=tol,
                 )
-                if converged:
-                    break
 
             # ── Advance state ─────────────────────────────────────────────
+            # Advance *before* breaking on convergence so the returned iterate
+            # is the improved one that was just validated (fix for F2).
             x_km1 = x_k
             x_k   = x_new
             z_k   = z_new
             t_k   = t_new
-            last_finite = x_k.copy()
+            # F10: refresh the rollback snapshot at the convergence-check
+            # cadence rather than every iteration.  Always refresh on
+            # convergence so the returned last_finite matches x_k.
+            if converged or (k + 1) % check_every == 0:
+                last_finite = x_k.copy()
+
+            if converged:
+                break
 
         else:
             self._log_no_convergence(num_iter, tol)

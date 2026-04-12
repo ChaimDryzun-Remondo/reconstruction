@@ -245,6 +245,21 @@ class WienerDeconv(DeconvBase):
         self.conj_psf_F: "backend.xp.ndarray" = self.conjPF  # alias used by deblur
         self.psf_F2: "backend.xp.ndarray" = backend._freeze(backend.xp.abs(self.PF) ** 2)
 
+        # ── F3: recompute HTM and Lipschitz from the Wiener-specific PF ───
+        # The base class set both from the iterative-family PF *before* the
+        # PF/conjPF override above, leaving stale values bound to the wrong
+        # spectrum.  Wiener itself does not read these fields, but keeping
+        # them consistent with the active PF closes a latent trap for any
+        # FISTA-style subclass of WienerDeconv.
+        htm_raw = backend.irfft2(
+            self.conjPF * backend.rfft2(self.mask), s=self.full_shape
+        ).astype(backend.xp.float32)
+        htm_max = float(backend.xp.max(htm_raw))
+        htm_floor = max(htm_floor_frac * htm_max, 1e-12)
+        backend.xp.clip(htm_raw, a_min=htm_floor, a_max=None, out=htm_raw)
+        self.HTM = backend._freeze(htm_raw)
+        self._lipschitz = float(backend.xp.max(self.psf_F2))
+
         # ── Image spectrum ─────────────────────────────────────────────────
         # rfft2 of the padded, tapered, normalised image.
         self.obj_F: "backend.xp.ndarray" = backend.rfft2(self.image)

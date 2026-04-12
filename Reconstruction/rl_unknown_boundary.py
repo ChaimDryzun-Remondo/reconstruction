@@ -116,7 +116,7 @@ class RLUnknownBoundary(DeconvBase):
         for k in range(num_iter):
 
             # ── Step 1: Forward model H x_k ──────────────────────────────
-            with backend.xp.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            with backend.errstate(over="ignore", invalid="ignore", divide="ignore"):
                 Hx_k = backend.irfft2(PF * backend.rfft2(x_k), s=fshape)
 
             # ── Step 2: Ratio on observed support Ω ──────────────────────
@@ -124,20 +124,21 @@ class RLUnknownBoundary(DeconvBase):
             ratio = (M * y) / ((Hx_k * M) + ((1.0 - M) + eps_dev))
 
             # ── Step 3: Back-projection H^T ratio ────────────────────────
-            with backend.xp.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            with backend.errstate(over="ignore", invalid="ignore", divide="ignore"):
                 back = backend.irfft2(conjPF * backend.rfft2(ratio), s=fshape)
 
             # ── Step 4: Mask-normalised RL update ────────────────────────
-            with backend.xp.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            with backend.errstate(over="ignore", invalid="ignore", divide="ignore"):
                 x_new = x_k * (back / (HTM + eps_dev))
 
             # ── Step 5: Optional multiplicative TV correction ─────────────
+            # F17: hoist the identical correction call out of both branches;
+            # only the application rule differs.
             if use_tv:
+                correction = tv_multiplicative_correction(x_k, lam)
                 if tv_on_full_canvas:
-                    correction = tv_multiplicative_correction(x_k, lam)
                     x_new /= correction
                 else:
-                    correction = tv_multiplicative_correction(x_k, lam)
                     x_new = x_new / (1.0 + (correction - 1.0) * M)
 
             # ── Step 6: Positivity projection ────────────────────────────
@@ -150,15 +151,23 @@ class RLUnknownBoundary(DeconvBase):
             )
 
             # ── Step 7: Convergence check ─────────────────────────────────
+            converged = False
             if k >= min_iter and (k + 1) % check_every == 0:
                 _, converged = self._check_convergence(
                     x_new, x_k, k=k, num_iter=num_iter, tol=tol,
                 )
-                if converged:
-                    break
 
+            # Advance state *before* breaking so the returned iterate is the
+            # improved one that was just validated (fix for F1).
             x_k = x_new
-            last_finite = x_k.copy()
+            # F10: refresh the rollback snapshot at the convergence-check
+            # cadence rather than every iteration.  Always refresh on
+            # convergence so the returned last_finite matches x_k.
+            if converged or (k + 1) % check_every == 0:
+                last_finite = x_k.copy()
+
+            if converged:
+                break
 
         else:
             self._log_no_convergence(num_iter, tol)

@@ -342,20 +342,20 @@ def tv_multiplicative_correction(
     [1] Dey et al., Microscopy Research and Technique, 2006, Eq. (5).
     """
     # ── Discrete gradient (forward differences, Neumann BC) ───────────────
-    with backend.xp.errstate(over="ignore", invalid="ignore", divide="ignore"):
+    with backend.errstate(over="ignore", invalid="ignore", divide="ignore"):
         dh, dw = forward_grad(x)
 
     # ── Smoothed gradient magnitude ───────────────────────────────────────
     # The ε² term prevents division by zero where ∇x ≈ 0 (flat regions).
     # This is standard in TV implementations and corresponds to the Huber
     # approximation of the L1 norm near the origin.
-    with backend.xp.errstate(over="ignore", invalid="ignore", divide="ignore"):
+    with backend.errstate(over="ignore", invalid="ignore", divide="ignore"):
         mag = backend.xp.sqrt(dh * dh + dw * dw + eps_grad * eps_grad)
 
     # ── Normalized gradient field  n = ∇x / |∇x|_ε ──────────────────────
     # In flat regions, mag ≈ eps_grad and (dh, dw) ≈ 0, so n ≈ 0 —
     # the regularization has no effect there, as desired.
-    with backend.xp.errstate(over="ignore", invalid="ignore", divide="ignore"):
+    with backend.errstate(over="ignore", invalid="ignore", divide="ignore"):
         nh = dh / mag
         nw = dw / mag
     # dh, dw, mag are no longer needed; allow garbage collection.
@@ -479,3 +479,54 @@ def prox_tv_chambolle(
     # Final primal recovery:  u* = v − γ · div(p*)
     result = v - gamma * backward_div(p_h, p_w)
     return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Vectorial soft-thresholding (TV shrinkage)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def shrink_tv(
+    x: "backend.xp.ndarray",
+    y: "backend.xp.ndarray",
+    thresh,
+    eps: float,
+    tvnorm: int,
+) -> "tuple[backend.xp.ndarray, backend.xp.ndarray]":
+    """
+    Shrinkage / vectorial soft-thresholding of a gradient pair.
+
+    For ``tvnorm=1`` (anisotropic TV), acts componentwise as classical
+    soft thresholding on each of ``x`` and ``y`` independently.
+
+    For ``tvnorm=2`` (isotropic TV), projects the per-pixel vector
+    ``(x, y)`` toward the origin by ``thresh``, with a small denominator
+    floor ``eps`` to guard the magnitude division near zero.
+
+    ``thresh`` may be a scalar (uniform) or an ``xp.ndarray`` of the same
+    shape as ``x``/``y`` (spatially-varying, used by TVAL3's adaptive
+    weighting).
+
+    Parameters
+    ----------
+    x, y : xp.ndarray
+        Horizontal and vertical gradient components.
+    thresh : float or xp.ndarray
+        Shrinkage threshold — scalar or per-pixel.
+    eps : float
+        Denominator floor for the tvnorm=2 magnitude division.
+    tvnorm : int
+        1 for anisotropic componentwise, 2 for isotropic vectorial.
+
+    Returns
+    -------
+    (x_s, y_s) : tuple[xp.ndarray, xp.ndarray]
+    """
+    if tvnorm == 1:
+        return (
+            backend.xp.sign(x) * backend.xp.maximum(backend.xp.abs(x) - thresh, 0.0),
+            backend.xp.sign(y) * backend.xp.maximum(backend.xp.abs(y) - thresh, 0.0),
+        )
+    else:
+        mag = backend.xp.sqrt(x * x + y * y)
+        scale = backend.xp.maximum(mag - thresh, 0.0) / (mag + eps)
+        return scale * x, scale * y

@@ -340,3 +340,30 @@ def _to_numpy(x: xp.ndarray) -> np.ndarray:
     if _use_gpu:
         return xp.asnumpy(x)  # cp.asnumpy performs a DMA copy to host.
     return x
+
+
+import contextlib as _contextlib
+
+
+@_contextlib.contextmanager
+def errstate(**kwargs):
+    """
+    Backend-agnostic floating-point error-state context manager.
+
+    On CPU (NumPy), delegates to ``numpy.errstate(**kwargs)`` to suppress or
+    raise floating-point warnings (overflow, invalid, divide, underflow).
+
+    On GPU (CuPy), this is a no-op: CuPy GPU kernels never raise Python-level
+    floating-point exceptions, so ``errstate`` has no effect there.  Using
+    ``cupy.errstate`` does not exist and would raise ``AttributeError``.
+
+    Usage (same syntax as ``numpy.errstate``)::
+
+        with backend.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            result = backend.irfft2(PF * backend.rfft2(x), s=shape)
+    """
+    if _use_gpu:
+        yield
+    else:
+        with np.errstate(**kwargs):
+            yield

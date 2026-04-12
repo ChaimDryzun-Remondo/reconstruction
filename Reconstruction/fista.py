@@ -280,9 +280,16 @@ class FISTADeconv(DeconvBase):
         )
 
         # ── FISTA state ─────────────────────────────────────────────────
+        # F18: x_km1 and y_k alias x_k on the first iteration.  The
+        # iteration body never mutates x_k, x_km1, or y_k in place (see
+        # the F12 invariant), so these aliases stay correct until the
+        # state advance at step 8 rebinds each name to a distinct buffer.
+        # Saves two full-canvas copies per deblur() call.  last_finite
+        # stays a true copy — it is the rollback snapshot and must be
+        # independent of the working iterate.
         x_k   = self.estimated_image.copy()  # current iterate x_k
-        x_km1 = x_k.copy()                   # previous iterate x_{k-1}
-        y_k   = x_k.copy()                   # Nesterov extrapolated point
+        x_km1 = x_k                          # previous iterate x_{k-1} (alias)
+        y_k   = x_k                          # Nesterov extrapolated point (alias)
         t_k   = 1.0                           # momentum parameter
         last_finite = x_k.copy()
 
@@ -379,11 +386,23 @@ class FISTADeconv(DeconvBase):
                     )
 
             # ── 8. Advance state ─────────────────────────────────────────
+            # F12: ``x_km1 = x_k`` is an alias rotation — each name ends up
+            # pointing at a distinct array (the one that was x_new two
+            # iterations ago, one iteration ago, and this iteration).  The
+            # restart test at step 7 reads
+            # ``(x_new − x_k) * (x_k − x_km1)``, which is correct only so
+            # long as nothing in the iteration body mutates x_k or x_km1
+            # in place.  Positivity projection writes via ``out=x_new``,
+            # never ``out=x_k``; if a future refactor adds ``out=x_k`` or
+            # similar, insert ``x_km1 = x_k.copy()`` to harden this.
             x_km1 = x_k
             x_k   = x_new
             y_k   = y_new
             t_k   = t_new
-            last_finite = x_k.copy()
+            # F10: refresh the rollback snapshot at the convergence-check
+            # cadence rather than every iteration.
+            if (k + 1) % check_every == 0:
+                last_finite = x_k.copy()
 
         else:
             self._log_no_convergence(num_iter, tol)
