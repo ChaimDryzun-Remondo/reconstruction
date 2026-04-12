@@ -99,61 +99,19 @@ conda activate reconstruction
 pytest tests/ --import-mode=importlib -v
 ```
 
-## Known pre-existing failures (not caused by solver refactors)
+## Resolved: lowercase-facade import contract (commit `0ead10c` follow-up)
 
-Four tests in `tests/test_import_smoke.py` fail on every commit in
-recent history and are unrelated to any solver change:
+The four formerly-failing tests in `tests/test_import_smoke.py` have
+been resolved.  The lowercase-facade dual-import contract
+(`import reconstruction` as a bare top-level name) was retired in a
+dedicated fix pass.  `import Reconstruction` is now the sole supported
+top-level entry point.
 
-- `TestImportSmoke::test_import_lowercase_facade_smoke`
-- `TestImportSmoke::test_import_uppercase_backend_smoke`
-- `TestImportSmoke::test_import_uppercase_base_aliases_lowercase_module`
-- `TestImportSmoke::test_uppercase_and_lowercase_exports_share_implementation_objects`
+The four tests were rewritten (not deleted) to assert real properties
+of the current package layout.  See `tests/test_import_smoke.py` and
+`docs/README.md` (*Import entry point* section) for the record.
 
-**Root cause.**  All four exercise a lowercase-facade dual-import
-contract — they require both `import reconstruction` *and*
-`import Reconstruction` to succeed and resolve to the same underlying
-module objects.  The facade was designed around a submodule physically
-named `reconstruction/`.  Commit `0ead10c` (*"Rename submodule
-reconstruction → external_reconstruction to avoid case collision with
-Reconstruction/ package on Windows"*) moved the physical directory out
-from under the lowercase name, leaving the facade stranded: after the
-rename, `import reconstruction` has no target on `sys.path` because no
-package by that name is installed or importable.  The facade file at
-`external_reconstruction/__init__.py` was intended to provide
-`RemondoPythonCore.reconstruction` (a dotted path under a parent
-package), not the bare `reconstruction` top-level name the tests use.
-
-**What was also part of this.**  The parent repo used to hold a
-stale `Reconstruction/` sibling with an `_alias.py` forwarder as a
-remnant of the old layout; pytest's default `prepend` import mode
-walked up to the parent rootpath and picked up that sibling instead
-of the submodule.  That sibling was deleted in the same refactor pass
-(see the accompanying parent-repo commit).  Its removal **did not
-affect these four failures** — they failed before the deletion too.
-
-**Do not** try to fix these by editing `tests/`.  The hard rule above
-forbids it, and the right fix is architectural.
-
-**Options for a dedicated fix pass** (pick one — ask me before
-implementing):
-
-- **A.**  `pip install -e ./external_reconstruction` from the parent
-  with the submodule's distribution name set to `reconstruction` (it
-  already is — see `pyproject.toml`).  Additional setuptools config
-  needed to make the dotted path
-  `reconstruction.Reconstruction._base` resolve as the tests use it.
-- **B.**  Create a physical `reconstruction/` shim package at the
-  parent repo root that forwards to
-  `external_reconstruction.Reconstruction`.  Conflicts with Windows
-  filesystem case-insensitivity if any `Reconstruction/` ever reappears
-  at the same level.
-- **C.**  Inject `sys.modules` aliases in `tests/conftest.py`.  Works
-  for the tests specifically; arguably a test-harness fix rather than
-  a real package fix.
-- **D.**  Update the four tests to match the post-rename reality
-  (only `Reconstruction` is a valid top-level name; the lowercase
-  facade is retired).  Requires explicit approval because it changes
-  an architectural contract the tests encode.
+Baseline is now **656 passed, 0 failed**.
 
 ## Active session scope: facade test architectural fix
 
