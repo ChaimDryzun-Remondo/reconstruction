@@ -31,6 +31,8 @@ import math
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.pnp
+
 # Skip the entire module when bm3d is not installed.
 bm3d_module = pytest.importorskip("bm3d", reason="bm3d not installed")
 

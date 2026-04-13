@@ -348,6 +348,23 @@ _REF_PATH = (
 )
 
 
+def _force_reference_cpu(ref_mod) -> None:
+    """
+    Force the standalone reference module onto the NumPy/CPU path.
+
+    The package tests already pin ``Reconstruction._backend`` to CPU via the
+    autouse fixture above.  The standalone reference module owns its own
+    backend globals and can otherwise auto-select a different path on some
+    machines.  Rebinding those globals before object construction keeps the
+    regression comparison package-vs-reference, not CPU-vs-GPU.
+    """
+    ref_mod._USER_GPU_FLAG = False
+    ref_mod._use_gpu = False
+    ref_mod.xp = np
+    ref_mod._fft = np.fft
+    ref_mod.ifftshift = np.fft.ifftshift
+
+
 def _load_reference_module():
     """Load docs/reference/Landweber_Unknown_Boundary.py via importlib."""
     if not _REF_PATH.exists():
@@ -357,6 +374,7 @@ def _load_reference_module():
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    _force_reference_cpu(mod)
     return mod
 
 

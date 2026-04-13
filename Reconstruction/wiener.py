@@ -51,7 +51,7 @@ from ._base import (
     _WIENER_PSF_TAPER_END_FRAC,
     _WIENER_PSF_TAPER_OUTER_FRAC,
     _prepare_psf_fft,
-    _split_init_and_deblur_kwargs,
+    _run_wrapper_deblur,
 )
 from ._common import padding, cropping, psf_preprocess, condition_psf
 
@@ -437,6 +437,10 @@ class WienerDeconv(DeconvBase):
                 alpha = backend.xp.exp(log_alpha)
 
         else:
+            # Manual alpha uses the current call's supplied parameter rather
+            # than an estimated noise level, so sigma_est reflects that by
+            # clearing any value cached from a prior auto-alpha call.
+            self._sigma_est = None
             # Manual alpha: ensure on correct device for Spectrum mode.
             if self.mode == "Spectrum":
                 alpha = backend.xp.asarray(alpha)
@@ -519,7 +523,10 @@ def wiener_deblur(
         Deblurred image, float32, shape (H, W) matching the original
         image field of view.
     """
-    init_kw, deblur_kw = _split_init_and_deblur_kwargs(
-        WienerDeconv._INIT_KEYS, kwargs
+    return _run_wrapper_deblur(
+        WienerDeconv,
+        WienerDeconv._INIT_KEYS,
+        image,
+        psf,
+        kwargs,
     )
-    return WienerDeconv(image=image, psf=psf, **init_kw).deblur(**deblur_kw)

@@ -100,7 +100,7 @@ import numpy as np
 from . import _backend as backend
 from ._denoise_utils import _HAS_BM3D, bm3d_denoise
 from .admm import ADMMDeconv
-from ._base import _split_init_and_deblur_kwargs
+from ._base import _run_wrapper_deblur
 
 logger = logging.getLogger(__name__)
 
@@ -484,9 +484,14 @@ def pnp_admm_deblur(
     ImportError
         If the ``bm3d`` package is not installed.
     """
-    init_kw, deblur_kw = _split_init_and_deblur_kwargs(
-        PnPADMM._INIT_KEYS, kwargs
-    )
-    return PnPADMM(image, psf, **init_kw).deblur(
-        num_iter=iters, lambda_tv=lambda_tv, **deblur_kw
+    return _run_wrapper_deblur(
+        PnPADMM,
+        PnPADMM._INIT_KEYS,
+        image,
+        psf,
+        kwargs,
+        explicit_deblur_kwargs={
+            "num_iter": iters,
+            "lambda_tv": lambda_tv,
+        },
     )

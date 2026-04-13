@@ -97,7 +97,7 @@ from typing import Optional
 import numpy as np
 
 from . import _backend as backend
-from ._base import DeconvBase, _split_init_and_deblur_kwargs
+from ._base import DeconvBase, _run_wrapper_deblur
 from ._tv_operators import backward_div_periodic, forward_grad_periodic, shrink_tv
 
 logger = logging.getLogger(__name__)
@@ -105,6 +105,30 @@ logger = logging.getLogger(__name__)
 # Module-level constants (float64 context)
 _EPSILON: float = 1e-8
 _EPS_GRAD: float = 1e-8
+
+
+def _reset_cost_history(obj, initial_cost: float) -> float:
+    """Reset per-call cost history to the initial iteration-0 value."""
+    obj.costs = [initial_cost]
+    return initial_cost
+
+
+def _append_cost_history(obj, cost: float) -> float:
+    """Append one cost sample to the current per-call history."""
+    obj.costs.append(cost)
+    return cost
+
+
+def _cost_history_copy(costs: list[float]) -> list[float]:
+    """Return a defensive copy of the public cost history."""
+    return list(costs)
+
+
+def _store_final_scalar(obj, attr: str, value: float) -> float:
+    """Persist one final scalar diagnostic value on the solver object."""
+    final_value = float(value)
+    setattr(obj, attr, final_value)
+    return final_value
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -619,8 +643,10 @@ class ADMMDeconv(DeconvBase):
         state: dict = self._prior_init(u)
 
         # Initial cost
-        prev_cost = self._compute_admm_cost(Hx_k, lambda_tv, state, _tvnorm)
-        self.costs = [prev_cost]
+        prev_cost = _reset_cost_history(
+            self,
+            self._compute_admm_cost(Hx_k, lambda_tv, state, _tvnorm),
+        )
 
         logger.debug(
             "ADMM deblur: num_iter=%d, lambda_tv=%.3e, TVnorm=%d, "
@@ -742,8 +768,10 @@ class ADMMDeconv(DeconvBase):
             last_finite = u.copy()
 
             # ── Step 8: Cost + logging ──────────────────────────────────────
-            cost = self._compute_admm_cost(Hx_k, lambda_tv, state, _tvnorm)
-            self.costs.append(cost)
+            cost = _append_cost_history(
+                self,
+                self._compute_admm_cost(Hx_k, lambda_tv, state, _tvnorm),
+            )
 
             if verbose:
                 logger.debug(
@@ -820,8 +848,8 @@ class ADMMDeconv(DeconvBase):
         else:
             self._log_no_convergence(num_iter, tol)
 
-        self._last_rho_v = rho_v
-        self._last_rho_w = rho_w
+        _store_final_scalar(self, "_last_rho_v", rho_v)
+        _store_final_scalar(self, "_last_rho_w", rho_w)
         del d_v, v, Hx_k, rhs, denom, prior_rhs
         return self._crop_and_return(
             u.astype(backend.xp.float32),
@@ -835,7 +863,7 @@ class ADMMDeconv(DeconvBase):
     @property
     def cost_history(self) -> list[float]:
         """Cost values: initial (iter 0) followed by one entry per iteration."""
-        return list(self.costs)
+        return _cost_history_copy(self.costs)
 
     @property
     def last_rho_v(self) -> float:
@@ -883,9 +911,14 @@ def admm_deblur(
     np.ndarray
         Deconvolved image.
     """
-    init_kw, deblur_kw = _split_init_and_deblur_kwargs(
-        ADMMDeconv._INIT_KEYS, kwargs
-    )
-    return ADMMDeconv(image, psf, **init_kw).deblur(
-        num_iter=iters, lambda_tv=lambda_tv, **deblur_kw
+    return _run_wrapper_deblur(
+        ADMMDeconv,
+        ADMMDeconv._INIT_KEYS,
+        image,
+        psf,
+        kwargs,
+        explicit_deblur_kwargs={
+            "num_iter": iters,
+            "lambda_tv": lambda_tv,
+        },
     )

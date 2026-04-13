@@ -439,7 +439,13 @@
 #     If (OH, OW) != (H, W): gray = odd_crop_around_center(gray, (OH, OW))
 #
 #   Step 4: Normalize to [0,1].
+#     gray_working_raw = gray.astype(np.float64, copy=True)
+#     gray_min = float(np.min(gray_working_raw))
+#     gray_max = float(np.max(gray_working_raw))
 #     gray = image_normalization(image=gray, bit_depth=1, is_int=False)
+#     If gray_max == gray_min (constant image), the affine map is undefined,
+#     so fall back to the grayscale odd-cropped image in raw units:
+#         gray = gray_working_raw.copy()
 #
 #   Step 5: Store original size (SINGLE assignment).
 #     self.h, self.w = gray.shape
@@ -504,7 +510,21 @@
 #     logger.debug("Lipschitz constant L = %.6f", self._lipschitz)
 #
 #   Step 13: Initial estimate on padded canvas.
-#     init_source = initialEstimate if initialEstimate is not None else gray
+#     If initialEstimate is provided:
+#       - validate
+#       - convert to grayscale
+#       - enforce odd shape
+#       - require shape == (self.h, self.w)
+#       - apply the same image-derived working-domain map:
+#           if gray_max > gray_min:
+#               init_source = (init_source - gray_min) / (gray_max - gray_min)
+#           else:
+#               init_source = init_source.copy()
+#         The constant-image fallback is therefore the same identity map used
+#         for the observed image working domain.
+#     Else:
+#       init_source = gray
+#
 #     self.estimated_image = xp.array(
 #         padding(init_source, self.full_shape, Type=paddingMode,
 #                 apply_taper=bool(apply_taper_on_padding_band)),
@@ -515,8 +535,14 @@
 #     self.estimated_image is the persistent object-level iterate state.
 #     Iterative subclasses typically start each new deblur() call from this
 #     stored padded-canvas iterate and overwrite it again on successful
-#     completion.  Wrapper functions do not share this state because they
-#     instantiate a fresh solver object for every call.
+#     completion.
+#
+#   SHARED REPEATED-CALL CONTRACT:
+#     - Iterative class instances are stateful warm-start solvers.
+#     - Wrapper functions are stateless cold-start helpers because they
+#       instantiate a fresh solver object for every call.
+#     - WienerDeconv reuses precomputed setup and diagnostic state across
+#       calls, but does not read a previous output iterate as input.
 #
 # ── ABSTRACT METHOD ────────────────────────────────────────────────────
 #
@@ -814,22 +840,32 @@
 #     support masked data fidelity in its classical formulation.
 #
 #   PSF HANDLING:
-#     Wiener inherits the same default preprocessing steps as DeconvBase:
+#     FINAL ACTIVE SCIENTIFIC CONTRACT:
+#     Wiener and the iterative-family solvers share the same PSF
+#     preprocessing / placement steps:
 #       - centre-of-mass centering
 #       - negative clipping
 #       - odd-shape enforcement
 #       - zero-padding to the FFT canvas
 #       - ifftshift before FFT placement
 #
-#     But after calling super().__init__(), Wiener rebuilds the PSF spectrum
-#     from the original PSF with a solver-specific conditioning override:
+#     The scientific difference is the conditioning preset used for the final
+#     active PSF spectrum:
 #       - iterative-family default:
 #           bg_ring_frac=0.15, taper_outer_frac=0.20, taper_end_frac=0.50
-#       - Wiener override:
+#       - Wiener active PF:
 #           bg_ring_frac=0.15, taper_outer_frac=0.90, taper_end_frac=1.0
 #
 #     Therefore Wiener and the iterative-family solvers do not, by default,
 #     use identical conditioned PSFs.
+#
+#     CURRENT CONSTRUCTOR-TIME IMPLEMENTATION DETAIL:
+#     Wiener calls super().__init__() first, so the base iterative-family PF
+#     is constructed with the 0.15 / 0.20 / 0.50 conditioning preset. Wiener
+#     then rebuilds the PSF spectrum from the original PSF and overwrites the
+#     active PF / conjPF with its own 0.15 / 0.90 / 1.0 conditioned version.
+#     The final active scientific contract is the overwritten Wiener PF, not
+#     the intermediate base-class PF.
 #
 #   def deblur(
 #       self,
@@ -870,8 +906,8 @@
 #     - For satellite imagery, typical SNR range: 10–1000 (λ = 0.1–0.001).
 #     - This is a fast baseline — useful for initial inspection and as
 #       an initial estimate for iterative methods.
-#     - WienerDeconv is stateful for precomputed setup and diagnostics, but
-#       repeated deblur() calls do NOT warm-start from the previous output.
+#     - Repeated-call semantics follow the shared repeated-call contract:
+#       WienerDeconv reuses setup/diagnostics but does not iterate-warm-start.
 #
 # WRAPPER: wiener_deblur(image, psf, snr=None, ...)
 #
@@ -1176,10 +1212,23 @@
 # """
 # Reconstruction — modular deconvolution algorithms for satellite imagery.
 #
-# All algorithms share a common base class (DeconvBase) that handles
-# image preprocessing, PSF conditioning, FFT setup, and unknown-boundary
-# mask construction.  Individual algorithms differ only in their
-# iteration strategy.
+# The package root is a lazy import surface:
+#   - `import Reconstruction` should succeed without eagerly importing
+#     solver modules.
+#   - Optional-dependency failures are rewritten on symbol access:
+#       * `PnPADMM` / `REDDeconv` -> clear `bm3d` message
+#       * Wiener auto-noise path  -> clear `scikit-image` message
+#   - Solver-symbol access still requires the shared preprocessing
+#     utilities from `RemondoPythonCore.Common` (preferred) or
+#     `Shared.Common` (legacy) at runtime.
+#   - Nested/transitive ImportError failures inside an available shared
+#     preprocessing namespace must be preserved as the original error,
+#     not mislabeled as if the namespace were absent.
+#
+# This means `import Reconstruction` is standalone-friendly only at the
+# package-root level. It does NOT guarantee that solver classes are
+# usable in a standalone environment without the shared preprocessing
+# namespace.
 #
 # Quick start (one-shot wrappers):
 #     from Reconstruction import rl_deblur_unknown_boundary
@@ -1192,44 +1241,39 @@
 #     result_100 = rl.deblur(num_iter=50)   # continues from iteration 50
 #
 # Repeated-call semantics:
-#     - iterative class instances are stateful warm-start solvers
-#     - wrapper functions are stateless cold-start helpers
-#     - WienerDeconv reuses setup/diagnostics across calls but does not
-#       warm-start from a previous output iterate
-#     - on explicit numerical failure, solver state remains finite but may
-#       reflect the last verified finite iterate reached during the failed call
+#     See the shared repeated-call and failure-state contracts above. In
+#     short: iterative class instances warm-start, wrappers are cold-start
+#     helpers, Wiener reuses setup/diagnostics without iterate warm-start,
+#     and failures preserve finite reusable state rather than exact rollback.
 #
 # Backend control:
 #     from Reconstruction import set_backend
 #     set_backend("cpu")   # Force CPU even if GPU available
 # """
 #
-# from ._backend import set_backend
-#
-# from .wiener import WienerDeconv, wiener_deblur
-# from .rl_standard import RLStandard, rl_deblur_standard
-# from .rl_unknown_boundary import RLUnknownBoundary, rl_deblur_unknown_boundary
-# from .landweber_unknown_boundary import (
-#     LandweberUnknownBoundary, landweber_deblur_unknown_boundary,
-# )
-# from .admm import ADMMDeconv, admm_deblur
-# from .tval3 import TVAL3Deconv, tval3_deblur
-#
-# __all__ = [
-#     "set_backend",
-#     "WienerDeconv", "wiener_deblur",
-#     "RLStandard", "rl_deblur_standard",
-#     "RLUnknownBoundary", "rl_deblur_unknown_boundary",
-#     "LandweberUnknownBoundary", "landweber_deblur_unknown_boundary",
-#     "ADMMDeconv", "admm_deblur",
-#     "TVAL3Deconv", "tval3_deblur",
-# ]
+# The current implementation achieves this through a lazy `__getattr__`
+# export table rather than eager top-level imports.
 #
 # ─── VERIFICATION (Phase 6) ────────────────────────────────────────────
-#   1. `from Reconstruction import *` — no import errors.
-#   2. Verify each algorithm class is accessible.
-#   3. Verify each wrapper function is accessible.
-#   4. Verify set_backend("cpu") works.
+#   1. `import Reconstruction` does not eagerly import solver modules.
+#   2. Core public names resolve lazily from the package root.
+#   3. Optional-dependency failures (`bm3d`, `scikit-image`) are rewritten
+#      clearly on symbol access or runtime use.
+#   4. Missing shared preprocessing namespaces raise the documented
+#      shared-utilities error on solver-symbol access.
+#   5. Nested shared-namespace import failures propagate their original
+#      ImportError rather than being mislabeled as namespace absence.
+#   6. Verify set_backend("cpu") works.
+#
+# ENVIRONMENT POLICY NOTE:
+#   The package metadata declares broad lower bounds (`python>=3.10`,
+#   `numpy>=1.24`, `scipy>=1.11`), but the numerical contract is only as
+#   strong as the environments that have been explicitly rechecked. Current
+#   validated core-profile baselines include:
+#     - Python 3.10.13 / NumPy 1.26.4 / SciPy 1.12.0
+#     - Python 3.11.15 / NumPy 2.4.3 / SciPy 1.17.1
+#   Wider version ranges remain compatibility targets until a broader matrix
+#   is exercised in CI or via pinned constraints.
 
 
 # ═════════════════════════════════════════════════════════════════════════════

@@ -192,6 +192,28 @@ _install_mocks()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Test-profile markers
+# ═══════════════════════════════════════════════════════════════════════════
+
+_NON_CORE_MARKERS = ("imaging", "pnp", "monorepo")
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """
+    Mark every test as ``core`` unless it already belongs to a non-core profile.
+
+    This keeps the default pytest command meaningful for standalone core
+    development while allowing explicit imaging / pnp / monorepo selections.
+    """
+    for item in items:
+        if item.get_closest_marker("core") is not None:
+            continue
+        if any(item.get_closest_marker(name) is not None for name in _NON_CORE_MARKERS):
+            continue
+        item.add_marker(pytest.mark.core)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Shared Fixtures
 # ═══════════════════════════════════════════════════════════════════════════
 

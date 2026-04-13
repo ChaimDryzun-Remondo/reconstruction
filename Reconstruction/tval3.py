@@ -79,7 +79,13 @@ from typing import Optional
 import numpy as np
 
 from . import _backend as backend
-from ._base import DeconvBase, _split_init_and_deblur_kwargs
+from ._base import DeconvBase, _run_wrapper_deblur
+from .admm import (
+    _append_cost_history,
+    _cost_history_copy,
+    _reset_cost_history,
+    _store_final_scalar,
+)
 from ._tv_operators import backward_div_periodic, forward_grad_periodic, shrink_tv
 
 logger = logging.getLogger(__name__)
@@ -499,8 +505,10 @@ class TVAL3Deconv(DeconvBase):
         d_w_w: "backend.xp.ndarray" = backend.xp.zeros_like(u)
 
         # Initial cost (Bug-fix #4: compute once, not twice)
-        prev_cost = self._compute_cost(w_h, w_w, Hx_k, lambda_tv, _tvnorm)
-        self.costs = [prev_cost]
+        prev_cost = _reset_cost_history(
+            self,
+            self._compute_cost(w_h, w_w, Hx_k, lambda_tv, _tvnorm),
+        )
 
         logger.debug(
             "TVAL3 deblur: num_iter=%d, lambda_tv=%.3e, TVnorm=%d, "
@@ -651,8 +659,10 @@ class TVAL3Deconv(DeconvBase):
             last_finite = u.copy()
 
             # ── Step 7: Cost + logging ──────────────────────────────────────
-            cost = self._compute_cost(w_h, w_w, Hx_k, lambda_tv, _tvnorm)
-            self.costs.append(cost)
+            cost = _append_cost_history(
+                self,
+                self._compute_cost(w_h, w_w, Hx_k, lambda_tv, _tvnorm),
+            )
 
             if verbose:
                 logger.debug(
@@ -716,7 +726,7 @@ class TVAL3Deconv(DeconvBase):
         else:
             self._log_no_convergence(num_iter, tol)
 
-        self._last_mu = rho_v
+        _store_final_scalar(self, "_last_mu", rho_v)
         del d_v, d_w_h, d_w_w, v, w_h, w_w, dx, dy, Hx_k, rhs, denom
         return self._crop_and_return(
             u.astype(backend.xp.float32),
@@ -730,7 +740,7 @@ class TVAL3Deconv(DeconvBase):
     @property
     def cost_history(self) -> list[float]:
         """Cost values: initial (iter 0) followed by one entry per iteration."""
-        return list(self.costs)
+        return _cost_history_copy(self.costs)
 
     @property
     def last_mu(self) -> float:
@@ -773,9 +783,14 @@ def tval3_deblur(
     np.ndarray
         Deconvolved image.
     """
-    init_kw, deblur_kw = _split_init_and_deblur_kwargs(
-        TVAL3Deconv._INIT_KEYS, kwargs
-    )
-    return TVAL3Deconv(image, psf, **init_kw).deblur(
-        num_iter=iters, lambda_tv=lambda_tv, **deblur_kw
+    return _run_wrapper_deblur(
+        TVAL3Deconv,
+        TVAL3Deconv._INIT_KEYS,
+        image,
+        psf,
+        kwargs,
+        explicit_deblur_kwargs={
+            "num_iter": iters,
+            "lambda_tv": lambda_tv,
+        },
     )
