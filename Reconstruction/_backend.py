@@ -29,6 +29,7 @@ from __future__ import annotations
 import importlib
 import logging
 from typing import Literal
+import warnings
 
 import numpy as np
 
@@ -46,6 +47,30 @@ PaddingStr = Literal["Reflect", "Symmetric", "Wrap", "Edge", "LinearRamp", "Zero
 
 # Set to False to force CPU even when a GPU is available.
 _USER_GPU_FLAG: bool = True
+
+
+def _configure_cupy_fft_plan_cache(cp) -> None:
+    """
+    Best-effort CuPy FFT plan-cache configuration.
+
+    CuPy exposes ``cp.fft.config.set_plan_cache_size`` on some versions, but
+    the API is currently experimental and may emit a ``FutureWarning`` or be
+    absent entirely. Reconstruction treats this as an optional startup
+    optimization only: if the API exists, configure it while suppressing only
+    the matching experimental warning; otherwise skip it silently.
+    """
+    config = getattr(cp.fft, "config", None)
+    set_cache_size = getattr(config, "set_plan_cache_size", None)
+    if set_cache_size is None:
+        return
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*set_plan_cache_size is experimental.*",
+            category=FutureWarning,
+        )
+        set_cache_size(64)
 
 
 def _detect_gpu() -> bool:
@@ -110,11 +135,8 @@ if _use_gpu:
     import cupy as cp
     xp = cp
     _fft = cp.fft
-    try:
-        # CuPy ≥ 12: pre-allocate FFT plan cache to avoid first-call latency.
-        cp.fft.config.set_plan_cache_size(64)  # 64 plans ≈ 16–32 MiB
-    except AttributeError:
-        pass  # Older CuPy; harmless.
+    # CuPy plan-cache tuning is a best-effort optimization only.
+    _configure_cupy_fft_plan_cache(cp)
 else:
     xp = np
     _fft = np.fft
@@ -171,10 +193,7 @@ def set_backend(mode: Literal["auto", "cpu", "gpu"]) -> None:
         import cupy as cp
         xp = cp
         _fft = cp.fft
-        try:
-            cp.fft.config.set_plan_cache_size(64)
-        except AttributeError:
-            pass
+        _configure_cupy_fft_plan_cache(cp)
     else:
         xp = np
         _fft = np.fft
