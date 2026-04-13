@@ -467,11 +467,22 @@ class TestRLNumericalFailureContract:
     def test_known_blow_up_case_raises_instead_of_returning_nonfinite_output(
         self, blurred_image, gaussian_psf
     ):
+        """
+        Legacy name retained: this setup is now a stabilized finite case.
+
+        With the current documented contract, ``htm_floor_frac=0.0`` does not
+        remove the absolute ``HTM`` safeguard because :class:`DeconvBase`
+        still applies ``max(htm_floor_frac * max(HTM), 1e-12)``. RL also keeps
+        ``epsilon_division`` in the update denominators. The result should
+        therefore remain finite rather than raising.
+        """
         solver = RLUnknownBoundary(
             image=blurred_image, psf=gaussian_psf, htm_floor_frac=0.0,
         )
-        with pytest.raises(FloatingPointError):
-            solver.deblur(num_iter=50, lambda_tv=0.0, tol=1e-6)
+        result = solver.deblur(num_iter=50, lambda_tv=0.0, tol=1e-6)
+
+        assert np.isfinite(result).all()
+        assert np.isfinite(np.array(solver.estimated_image)).all()
 
     def test_failed_run_does_not_overwrite_estimated_image_with_nonfinite_values(
         self, blurred_image, gaussian_psf, monkeypatch

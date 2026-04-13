@@ -412,6 +412,73 @@ class TestWorkingDomainContract:
 
         np.testing.assert_allclose(result, expected, atol=1e-6)
 
+    def test_constant_image_uses_explicit_identity_fallback_working_domain(
+        self, gaussian_psf
+    ):
+        """
+        Constant observed images fall back to the odd-cropped grayscale values.
+
+        The non-degenerate affine normalization is undefined when the image
+        range is zero, so the degenerate fallback keeps the grayscale working
+        domain in raw units rather than forcing a synthetic [0, 1] remap.
+        """
+        image = np.full((6, 8, 3), 5.0, dtype=np.float64)
+        deconv = _TestDeconv(image, gaussian_psf)
+
+        expected = _to_expected_working_domain(image)
+        result = deconv.deblur()
+
+        np.testing.assert_allclose(result, expected, atol=1e-6)
+        np.testing.assert_allclose(
+            result,
+            np.asarray(deconv.image)[
+                (deconv.full_shape[0] - deconv.h) // 2:(deconv.full_shape[0] + deconv.h) // 2,
+                (deconv.full_shape[1] - deconv.w) // 2:(deconv.full_shape[1] + deconv.w) // 2,
+            ],
+            atol=1e-6,
+        )
+
+    def test_constant_image_initial_estimate_uses_same_identity_fallback(
+        self, gaussian_psf
+    ):
+        """
+        initialEstimate follows the same degenerate identity map as the image.
+
+        For a constant observed image, both the observed image and the initial
+        estimate stay in the grayscale odd-cropped raw-unit working domain.
+        """
+        image = np.full((6, 8, 3), 5.0, dtype=np.float64)
+        initial = np.linspace(100.0, 400.0, 6 * 8, dtype=np.float64).reshape(6, 8)
+
+        deconv = _TestDeconv(image, gaussian_psf, initialEstimate=initial)
+        result = deconv.deblur()
+
+        expected = initial[0:5, 0:7].astype(np.float64)
+        np.testing.assert_allclose(result, expected, atol=1e-6)
+
+    def test_constant_image_initial_estimate_shape_must_match_working_domain(
+        self, gaussian_psf
+    ):
+        image = np.full((6, 8, 3), 5.0, dtype=np.float64)
+        bad_initial = np.ones((6, 6), dtype=np.float64)
+
+        with pytest.raises(ValueError, match="initialEstimate must match the image working-domain shape"):
+            _TestDeconv(image, gaussian_psf, initialEstimate=bad_initial)
+
+    def test_nondegenerate_path_remains_unit_interval_affine_map(
+        self, gaussian_psf
+    ):
+        """The constant-image fallback must not change the non-degenerate path."""
+        image = np.linspace(10.0, 30.0, 6 * 8, dtype=np.float64).reshape(6, 8)
+        deconv = _TestDeconv(image, gaussian_psf)
+
+        result = deconv.deblur()
+        expected = _to_expected_working_domain(image)
+
+        np.testing.assert_allclose(result, expected, atol=1e-6)
+        assert float(result.min()) == pytest.approx(0.0, abs=1e-7)
+        assert float(result.max()) == pytest.approx(1.0, abs=1e-7)
+
     def test_output_is_returned_in_working_domain_grayscale_scale(self, gaussian_psf):
         image = np.linspace(5.0, 55.0, 6 * 8 * 3, dtype=np.float64).reshape(6, 8, 3)
         result = _TestDeconv(image, gaussian_psf).deblur()

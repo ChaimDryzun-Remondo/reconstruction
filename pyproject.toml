@@ -35,7 +35,13 @@ include = ["Reconstruction*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short -m 'not imaging and not pnp and not monorepo'"
+markers = [
+    "core: standalone core profile with no optional imaging, PnP, or monorepo requirements",
+    "imaging: requires imaging extras such as scikit-image",
+    "pnp: requires the optional bm3d-based PnP/RED stack",
+    "monorepo: requires the real RemondoPythonCore.Common monorepo environment",
+]
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]

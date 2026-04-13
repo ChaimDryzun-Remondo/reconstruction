@@ -45,7 +45,7 @@ from typing import Optional
 import numpy as np
 
 from . import _backend as backend
-from ._base import DeconvBase, _split_init_and_deblur_kwargs
+from ._base import DeconvBase, _run_wrapper_deblur
 from ._tv_operators import prox_tv_chambolle
 
 logger = logging.getLogger(__name__)
@@ -332,8 +332,10 @@ def landweber_deblur_unknown_boundary(
         Deconvolved image, shape (H, W) matching the original image
         field of view.
     """
-    init_kw, deblur_kw = _split_init_and_deblur_kwargs(
-        DeconvBase._INIT_KEYS, kwargs
+    return _run_wrapper_deblur(
+        LandweberUnknownBoundary,
+        DeconvBase._INIT_KEYS,
+        image,
+        psf,
+        kwargs,
     )
-    obj = LandweberUnknownBoundary(image=image, psf=psf, **init_kw)
-    return obj.deblur(**deblur_kw)

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import logging
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -73,6 +73,40 @@ def _split_init_and_deblur_kwargs(
     init_kw = {k: v for k, v in kwargs.items() if k in init_keys}
     deblur_kw = {k: v for k, v in kwargs.items() if k not in init_keys}
     return init_kw, deblur_kw
+
+
+def _run_wrapper_deblur(
+    solver_cls: type,
+    init_keys: frozenset[str],
+    image: np.ndarray,
+    psf: np.ndarray,
+    kwargs: dict[str, Any],
+    *,
+    explicit_init_kwargs: Optional[dict[str, Any]] = None,
+    explicit_deblur_kwargs: Optional[dict[str, Any]] = None,
+) -> np.ndarray:
+    """
+    Shared helper for one-shot wrapper functions.
+
+    Keeps wrapper behavior unchanged: split ``kwargs`` with
+    :func:`_split_init_and_deblur_kwargs`, build a fresh solver instance, and
+    call ``deblur()`` with any wrapper-fixed arguments plus the routed deblur
+    kwargs.
+    """
+    init_kw, deblur_kw = _split_init_and_deblur_kwargs(init_keys, kwargs)
+
+    if explicit_init_kwargs is None:
+        explicit_init_kwargs = {}
+
+    solver = solver_cls(
+        image=image,
+        psf=psf,
+        **explicit_init_kwargs,
+        **init_kw,
+    )
+    if explicit_deblur_kwargs is None:
+        return solver.deblur(**deblur_kw)
+    return solver.deblur(**explicit_deblur_kwargs, **deblur_kw)
 
 
 def _prepare_psf_fft(
@@ -271,10 +305,16 @@ class DeconvBase(ABC):
         # ── Step 4: Normalise to [0, 1] float ─────────────────────────────
         # Keeps FFT magnitudes well-conditioned and makes noise-variance
         # estimates directly comparable to the signal range.
+        #
+        # Degenerate fallback: if the grayscale image is constant, the affine
+        # normalization map is undefined. In that case the working domain is
+        # the grayscale, odd-cropped image in raw units.
         gray_working_raw = gray.astype(np.float64, copy=True)
         gray_min = float(np.min(gray_working_raw))
         gray_max = float(np.max(gray_working_raw))
         gray = image_normalization(image=gray, bit_depth=1, is_int=False)
+        if gray_max == gray_min:
+            gray = gray_working_raw.copy()
 
         # ── Step 5: Store original size — SINGLE assignment ────────────────
         # Note: the reference RL file accidentally assigns self.h, self.w
@@ -386,6 +426,9 @@ class DeconvBase(ABC):
         # If provided, the initial estimate must live in the same working
         # domain as the observation: grayscale, odd-cropped, and scaled
         # with the *image-derived* affine map rather than its own min/max.
+        # For constant images, the shared fallback domain is the raw grayscale
+        # odd-cropped image, so the initial estimate follows the same identity
+        # mapping.
         if initialEstimate is not None:
             validate_image(initialEstimate)
             init_source = to_grayscale(initialEstimate)

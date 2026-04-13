@@ -77,7 +77,7 @@ from typing import Optional
 import numpy as np
 
 from . import _backend as backend
-from ._base import DeconvBase, _split_init_and_deblur_kwargs
+from ._base import DeconvBase, _run_wrapper_deblur
 
 logger = logging.getLogger(__name__)
 
@@ -606,13 +606,15 @@ def fista_deblur(
         Deconvolved image, shape (H, W) matching the original image field of
         view.
     """
-    init_kw, deblur_kw = _split_init_and_deblur_kwargs(
-        FISTADeconv._INIT_KEYS, kwargs
-    )
-    solver = FISTADeconv(image, psf, **init_kw)
-    return solver.deblur(
-        num_iter=iters,
-        lambda_reg=lambda_reg,
-        reg_mode=reg_mode,
-        **deblur_kw,
+    return _run_wrapper_deblur(
+        FISTADeconv,
+        FISTADeconv._INIT_KEYS,
+        image,
+        psf,
+        kwargs,
+        explicit_deblur_kwargs={
+            "num_iter": iters,
+            "lambda_reg": lambda_reg,
+            "reg_mode": reg_mode,
+        },
     )

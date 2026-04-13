@@ -23,6 +23,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+imaging = pytest.mark.imaging
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Load module under test
 # ─────────────────────────────────────────────────────────────────────────────
@@ -383,6 +385,37 @@ class TestDeblurOutput:
         out2 = wiener_deblur(blurred_clean, psf, alpha=0.005)
         np.testing.assert_allclose(out1, out2, atol=1e-7)
 
+    def test_nonfinite_final_iterate_raises_and_preserves_finite_reusable_state(
+        self, blurred_clean, psf, monkeypatch
+    ):
+        w = WienerDeconv(blurred_clean, psf)
+        initial_state = np.array(w.estimated_image, copy=True)
+        original_irfft2 = wiener_module.backend.irfft2
+
+        def _nan_irfft2(*args, **kwargs):
+            return wiener_module.backend.xp.full(
+                w.full_shape,
+                wiener_module.backend.xp.nan,
+                dtype=wiener_module.backend.xp.float32,
+            )
+
+        monkeypatch.setattr(wiener_module.backend, "irfft2", _nan_irfft2)
+
+        with pytest.raises(FloatingPointError, match="final iterate"):
+            w.deblur(alpha=0.005)
+
+        failed_state = np.array(w.estimated_image, copy=True)
+        assert np.isfinite(failed_state).all()
+        np.testing.assert_allclose(failed_state, initial_state, atol=0.0, rtol=0.0)
+
+        monkeypatch.setattr(wiener_module.backend, "irfft2", original_irfft2)
+
+        # Failure-state preservation must not turn Wiener into a warm-start solver.
+        w.estimated_image[...] = np.float32(0.123)
+        recovered = w.deblur(alpha=0.005)
+        fresh = WienerDeconv(blurred_clean, psf).deblur(alpha=0.005)
+        np.testing.assert_allclose(recovered, fresh, atol=1e-7)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Auto-alpha and property tests
@@ -402,23 +435,45 @@ class TestAutoAlphaAndProperties:
         w.deblur(alpha=0.01)
         assert w.sigma_est is None
 
+    def test_manual_alpha_resets_stale_sigma_est_from_prior_auto_call(
+        self, blurred_clean, psf, monkeypatch
+    ):
+        """
+        sigma_est reflects the current call semantics, not historical object state.
+
+        This test forces the auto-alpha path without requiring scikit-image so
+        the stale-state regression is covered by the core profile.
+        """
+        w = WienerDeconv(blurred_clean, psf)
+
+        monkeypatch.setattr(w, "_estimate_sigma", lambda: 0.123)
+
+        w.deblur()  # auto
+        assert w.sigma_est == pytest.approx(0.123)
+
+        w.deblur(alpha=0.01)  # manual
+        assert w.sigma_est is None
+
     def test_sigma_est_set_after_auto_alpha(self, noisy_blurred, psf):
         w = WienerDeconv(noisy_blurred, psf)
         w.deblur()  # auto
         assert w.sigma_est is not None
         assert w.sigma_est > 0.0
+    test_sigma_est_set_after_auto_alpha = imaging(test_sigma_est_set_after_auto_alpha)
 
     def test_last_alpha_positive_tikhonov_auto(self, noisy_blurred, psf):
         w = WienerDeconv(noisy_blurred, psf, mode="Tikhonov")
         w.deblur()
         assert isinstance(w.last_alpha, float)
         assert w.last_alpha > 0.0
+    test_last_alpha_positive_tikhonov_auto = imaging(test_last_alpha_positive_tikhonov_auto)
 
     def test_last_alpha_positive_classical_auto(self, noisy_blurred, psf):
         w = WienerDeconv(noisy_blurred, psf, mode="Classical")
         w.deblur()
         assert isinstance(w.last_alpha, float)
         assert w.last_alpha > 0.0
+    test_last_alpha_positive_classical_auto = imaging(test_last_alpha_positive_classical_auto)
 
     def test_last_alpha_array_spectrum_auto(self, noisy_blurred, psf):
         """Spectrum auto-alpha should be a 2-D array, not a scalar."""
@@ -427,6 +482,7 @@ class TestAutoAlphaAndProperties:
         alpha = w.last_alpha
         assert isinstance(alpha, np.ndarray)
         assert alpha.ndim == 2
+    test_last_alpha_array_spectrum_auto = imaging(test_last_alpha_array_spectrum_auto)
 
     def test_gamma_scales_tikhonov_alpha(self, noisy_blurred, psf):
         """Larger gamma → proportionally larger Tikhonov alpha."""
@@ -434,6 +490,7 @@ class TestAutoAlphaAndProperties:
         w2 = WienerDeconv(noisy_blurred, psf, mode="Tikhonov", gamma=2.0)
         w1.deblur(); w2.deblur()
         assert w2.last_alpha == pytest.approx(2.0 * w1.last_alpha, rel=1e-4)
+    test_gamma_scales_tikhonov_alpha = imaging(test_gamma_scales_tikhonov_alpha)
 
     def test_last_alpha_is_overwritten_by_later_calls(self, blurred_clean, psf):
         w = WienerDeconv(blurred_clean, psf)
@@ -453,11 +510,13 @@ class TestHelperMethods:
         w = WienerDeconv(noisy_blurred, psf)
         sigma = w._estimate_sigma()
         assert sigma > 0.0
+    test_estimate_sigma_returns_positive = imaging(test_estimate_sigma_returns_positive)
 
     def test_estimate_sigma_clean_lower_than_noisy(self, blurred_clean, noisy_blurred, psf):
         w_clean = WienerDeconv(blurred_clean, psf)
         w_noisy = WienerDeconv(noisy_blurred, psf)
         assert w_clean._estimate_sigma() < w_noisy._estimate_sigma()
+    test_estimate_sigma_clean_lower_than_noisy = imaging(test_estimate_sigma_clean_lower_than_noisy)
 
     def test_alpha_from_sigma_positive(self):
         rng = np.random.default_rng(1)
@@ -523,6 +582,7 @@ class TestReconstructionQuality:
         w = WienerDeconv(blurred_clean, psf, mode="Spectrum")
         out = w.deblur()
         assert np.all(np.isfinite(out))
+    test_spectrum_mode_deblurs = imaging(test_spectrum_mode_deblurs)
 
     def test_auto_alpha_tikhonov_finite(self, noisy_blurred, psf):
         """Auto-alpha Tikhonov should produce finite, non-trivial output."""
@@ -530,6 +590,7 @@ class TestReconstructionQuality:
         out = w.deblur()
         assert np.all(np.isfinite(out))
         assert float(out.var()) > 0.0  # not a flat image
+    test_auto_alpha_tikhonov_finite = imaging(test_auto_alpha_tikhonov_finite)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -564,6 +625,7 @@ class TestWienerDeblurWrapper:
         """gamma is an init param; wrapper must forward it correctly."""
         out = wiener_deblur(noisy_blurred, psf, mode="Tikhonov", gamma=2.0)
         assert isinstance(out, np.ndarray)
+    test_gamma_forwarded_to_init = imaging(test_gamma_forwarded_to_init)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -625,3 +687,6 @@ class TestRegressionVsReference:
         ref_crop = ref[:w.h, :w.w]
         np.testing.assert_allclose(ours, ref_crop, atol=1e-5,
                                    err_msg="Spectrum regression mismatch")
+
+
+TestRegressionVsReference = imaging(TestRegressionVsReference)

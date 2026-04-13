@@ -111,7 +111,7 @@ import numpy as np
 from . import _backend as backend
 from ._denoise_utils import _HAS_BM3D, bm3d_denoise
 from .admm import ADMMDeconv
-from ._base import _split_init_and_deblur_kwargs
+from ._base import _run_wrapper_deblur
 
 logger = logging.getLogger(__name__)
 
@@ -490,8 +490,15 @@ def red_deblur(
     ImportError
         If the ``bm3d`` package is not installed.
     """
-    init_kw, deblur_kw = _split_init_and_deblur_kwargs(
-        REDDeconv._INIT_KEYS, kwargs
+    return _run_wrapper_deblur(
+        REDDeconv,
+        REDDeconv._INIT_KEYS,
+        image,
+        psf,
+        kwargs,
+        explicit_init_kwargs={"sigma": sigma},
+        explicit_deblur_kwargs={
+            "num_iter": iters,
+            "lambda_reg": lambda_reg,
+        },
     )
-    solver = REDDeconv(image, psf, sigma=sigma, **init_kw)
-    return solver.deblur(num_iter=iters, lambda_reg=lambda_reg, **deblur_kw)

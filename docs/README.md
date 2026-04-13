@@ -8,6 +8,29 @@ preprocessing, padded-canvas construction, binary mask M for unknown-boundary
 masking, PSF conditioning, frequency-domain precomputation, and GPU/CPU backend
 selection.
 
+## Working Domain
+
+The package working domain is currently:
+
+- grayscale
+- odd-cropped in each spatial dimension if needed
+- affine-normalized to `[0, 1]` for non-degenerate images
+
+For degenerate constant images, the affine normalization map is undefined.
+The explicit fallback is therefore:
+
+- use the grayscale, odd-cropped image in raw units
+
+`initialEstimate`, if provided, is transformed into that same working domain:
+
+- non-degenerate image: apply the image-derived affine map
+- constant image: apply the same identity fallback as the observed image
+
+This means a non-degenerate image can still produce an `initialEstimate`
+outside `[0, 1]` when the supplied initial estimate lies outside the observed
+image range. For constant images, both the image working domain and the
+`initialEstimate` remain in grayscale raw units.
+
 ## Boundary Handling
 
 The package does not currently expose a single public `boundary_policy` API.
@@ -71,7 +94,7 @@ contract for the user-supplied PSF array.
 
 For the iterative-family solvers (`RLUnknownBoundary`,
 `LandweberUnknownBoundary`, `FISTADeconv`, `ChambollePockDeconv`,
-`ADMMDeconv`, `TVAL3Deconv`, `PnPADMM`, `REDDeconv`), the default PSF pipeline
+`ADMMDeconv`, `TVAL3Deconv`, `PnPADMM`, `REDDeconv`), the active PSF pipeline
 is:
 
 1. Centre by centre of mass (`center_method="com"`).
@@ -87,21 +110,37 @@ This policy is scientifically destructive in the sense that it may alter the
 submitted PSF centroid, support, negativity pattern, and wing amplitudes before
 the forward model is built.
 
-`WienerDeconv` shares the same centering, clipping, odd-shape enforcement,
-zero-padding, and `ifftshift` placement steps, but it currently uses a
-solver-specific conditioning override:
+`WienerDeconv` shares the same preprocessing and placement steps:
+
+1. Centre by centre of mass (`center_method="com"`).
+2. Clip negative values (`remove_negatives="clip"`).
+3. Enforce odd spatial shape (`enforce_odd_shape=True`).
+4. Zero-pad to the FFT canvas (`Type="Zero"`, `apply_taper=False`).
+5. Apply `ifftshift` before FFT placement.
+
+The scientific difference is the conditioning preset used for the final active
+PSF spectrum:
 
 - iterative-family default:
   `bg_ring_frac=0.15`, `taper_outer_frac=0.20`, `taper_end_frac=0.50`
-- Wiener override:
+- Wiener active PF:
   `bg_ring_frac=0.15`, `taper_outer_frac=0.90`, `taper_end_frac=1.0`
 
-So Wiener and the iterative-family solvers do not, by default, operate on
-identically conditioned PSFs.
+So Wiener and the iterative-family solvers share centering, clipping,
+odd-shape enforcement, zero-padding, and `ifftshift` placement, but do not, by
+default, operate on identically conditioned PSFs.
+
+Current constructor-time implementation detail:
+`WienerDeconv` first executes `DeconvBase.__init__()`, which constructs the
+iterative-family PSF spectrum with the `0.15 / 0.20 / 0.50` conditioning
+preset, and then immediately rebuilds and overwrites `PF` / `conjPF` from the
+original user PSF with the Wiener-specific `0.15 / 0.90 / 1.0` conditioning
+preset. The final active scientific contract is the overwritten Wiener
+conditioned PF, not the intermediate base-class PF.
 
 ## Statefulness and Repeated Calls
 
-The package currently has two distinct calling contracts:
+The package uses one shared repeated-call contract with three cases:
 
 - Class instances for the iterative solvers
   (`RLUnknownBoundary`, `LandweberUnknownBoundary`, `FISTADeconv`,
@@ -115,8 +154,8 @@ The package currently has two distinct calling contracts:
   Each wrapper call constructs a fresh solver object, runs `deblur()`, and
   discards the internal state afterwards.
 
-- `WienerDeconv` is stateful for setup and diagnostics, but not for iterate
-  warm starts.
+- `WienerDeconv` is stateful for setup and diagnostics, but not for
+  iterate warm starts.
   Repeated calls reuse constructor-time FFT setup and update diagnostic
   fields such as `last_alpha` / `sigma_est`, but they do not read the prior
   `estimated_image` as an initial iterate because Wiener is not iterative.
@@ -271,20 +310,70 @@ From the submodule root, with the reconstruction conda env active:
 
 ```bash
 conda activate reconstruction
-pytest tests/ --import-mode=importlib -v
+cd external_reconstruction
+python -m pip install -e .
+python -m pytest -q tests
 ```
 
-`--import-mode=importlib` is required.  Pytest's default `prepend`
-import mode walks up from `tests/test_*.py` through both
-`tests/__init__.py` and `external_reconstruction/__init__.py` to the
-parent repo root, which shadows the submodule's inner `Reconstruction/`
-package with any `Reconstruction/` directory that happens to exist at
-the parent level.  `importlib` mode bypasses the walk.
+The default test command now runs the `core` profile only.  Tests marked
+`imaging`, `pnp`, or `monorepo` are excluded by default so a standalone core
+install does not fail on optional dependencies.
+
+### Supported test profiles
+
+```bash
+# Core standalone profile (default)
+cd external_reconstruction
+python -m pip install -e .
+python -m pytest -q tests
+
+# Imaging profile (requires scikit-image and related imaging extras)
+cd external_reconstruction
+python -m pip install -e ".[imaging]"
+python -m pytest -q tests --override-ini="addopts=-v --tb=short" -m imaging
+
+# PnP / RED profile (requires bm3d)
+cd external_reconstruction
+python -m pip install -e ".[pnp]"
+python -m pytest -q tests --override-ini="addopts=-v --tb=short" -m pnp
+
+# Full local standalone sweep (core + imaging + pnp)
+cd external_reconstruction
+python -m pip install -e ".[imaging,pnp]"
+python -m pytest -q tests --override-ini="addopts=-v --tb=short" -m "core or imaging or pnp"
+
+# Monorepo-only tests (reserved for tests that intentionally use the real
+# RemondoPythonCore.Common namespace instead of the test mocks)
+cd ~/git/RemondoPythonCore
+python -m pytest -q external_reconstruction/tests --override-ini="addopts=-v --tb=short" -m monorepo
+```
 
 ### Import entry point
 
 `import Reconstruction` is the sole supported top-level entry point.
 Bare `import reconstruction` (lowercase) is not supported.
+
+Current import contract:
+
+- `import Reconstruction` is lazy and standalone-friendly at the package-root
+  level. It imports the package entry point and export table, but does not
+  eagerly import solver modules.
+- Accessing optional symbols rewrites missing optional dependencies into
+  explicit user-facing errors:
+  `PnPADMM` / `REDDeconv` report missing `bm3d`, and Wiener automatic noise
+  estimation reports missing `scikit-image`.
+- Accessing solver symbols such as `WienerDeconv` or `RLUnknownBoundary` still
+  requires the shared preprocessing utilities at runtime from
+  `RemondoPythonCore.Common` (preferred) or `Shared.Common` (legacy). A plain
+  `import Reconstruction` does not guarantee that those solver modules are
+  importable in a standalone environment.
+- Nested or transitive import failures inside an available shared-preprocessing
+  namespace are preserved as their original `ImportError`; they are not
+  relabeled as if the namespace were simply missing.
+- Most tests do not exercise the real runtime namespace layout directly:
+  `tests/conftest.py` installs mock `RemondoPythonCore.Common` /
+  `Shared.Common` modules, so the default test environment and a bare
+  standalone runtime are intentionally not identical.
 
 The commit `0ead10c` renamed the submodule directory
 `reconstruction/` → `external_reconstruction/`, retiring the

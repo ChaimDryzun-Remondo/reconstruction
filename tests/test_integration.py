@@ -21,6 +21,9 @@ import Reconstruction
 import Reconstruction._backend as backend
 from Reconstruction._base import DeconvBase
 
+imaging = pytest.mark.imaging
+pnp = pytest.mark.pnp
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Fixtures
@@ -178,6 +181,9 @@ class TestAllAlgorithmsRun:
             )
 
 
+TestAllAlgorithmsRun = imaging(TestAllAlgorithmsRun)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Cross-algorithm consistency
 # ══════════════════════════════════════════════════════════════════════════════
@@ -201,6 +207,7 @@ class TestCrossAlgorithmConsistency:
             assert float(np.min(result)) > -100.0, (
                 f"{name}: min output {np.min(result):.4f} unreasonably negative"
             )
+    test_all_outputs_in_reasonable_range = imaging(test_all_outputs_in_reasonable_range)
 
     def test_wiener_same_shape_as_iterative(
         self, integration_blurred, integration_psf, integration_image
@@ -213,6 +220,7 @@ class TestCrossAlgorithmConsistency:
             integration_blurred, integration_psf, iters=5, lambda_tv=0.01
         )
         assert wiener_result.shape == admm_result.shape == integration_image.shape
+    test_wiener_same_shape_as_iterative = imaging(test_wiener_same_shape_as_iterative)
 
     def test_class_and_wrapper_produce_same_result(
         self, integration_blurred, integration_psf
@@ -316,3 +324,4 @@ class TestRootNamespaceInstantiation:
         instance = PnPADMM(integration_blurred, integration_psf,
                            rho_v=1.0, rho_z=1.0)
         assert isinstance(instance, DeconvBase)
+    test_pnp_instantiation_from_root = pnp(test_pnp_instantiation_from_root)

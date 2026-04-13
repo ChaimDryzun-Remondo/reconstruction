@@ -20,6 +20,8 @@ import inspect
 import numpy as np
 import pytest
 
+pnp = pytest.mark.pnp
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. `from Reconstruction import *` does not raise
@@ -148,6 +150,7 @@ class TestPnPAvailability:
         )
         assert "PnPADMM" in Reconstruction.__all__
         assert "pnp_admm_deblur" in Reconstruction.__all__
+    test_pnp_available_when_bm3d_installed = pnp(test_pnp_available_when_bm3d_installed)
 
     def test_pnp_callable_when_available(self):
         """When bm3d is installed, PnPADMM and pnp_admm_deblur are callable."""
@@ -155,6 +158,7 @@ class TestPnPAvailability:
         from Reconstruction import PnPADMM, pnp_admm_deblur
         assert callable(PnPADMM)
         assert callable(pnp_admm_deblur)
+    test_pnp_callable_when_available = pnp(test_pnp_callable_when_available)
 
     def test_import_star_without_bm3d(self, monkeypatch):
         """
@@ -208,6 +212,7 @@ class TestInheritance:
         pytest.importorskip("bm3d", reason="bm3d not installed")
         from Reconstruction import PnPADMM, ADMMDeconv
         assert issubclass(PnPADMM, ADMMDeconv)
+    test_pnp_inherits_admmdeconv = pnp(test_pnp_inherits_admmdeconv)
 
     def test_admm_deconv_inherits_deconvbase(self):
         """ADMMDeconv is a subclass of DeconvBase (ADMM hierarchy check)."""

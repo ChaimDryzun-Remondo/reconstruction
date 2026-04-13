@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import builtins
 import importlib
 import sys
+import types
 
 import pytest
 
@@ -30,6 +32,83 @@ def _clear_reconstruction_modules() -> None:
             del sys.modules[name]
 
 
+def _snapshot_common_namespace_modules() -> dict[str, object]:
+    return {
+        name: module
+        for name, module in sys.modules.items()
+        if (
+            name == "RemondoPythonCore"
+            or name.startswith("RemondoPythonCore.")
+            or name == "Shared"
+            or name.startswith("Shared.")
+        )
+    }
+
+
+def _clear_common_namespace_modules() -> None:
+    for name in list(sys.modules):
+        if (
+            name == "RemondoPythonCore"
+            or name.startswith("RemondoPythonCore.")
+            or name == "Shared"
+            or name.startswith("Shared.")
+        ):
+            del sys.modules[name]
+
+
+def _install_common_namespace(root: str, *, odd_crop_in_general_utils: bool, label: str) -> dict[str, object]:
+    root_mod = types.ModuleType(root)
+    root_mod.__path__ = []
+    common_mod = types.ModuleType(f"{root}.Common")
+    common_mod.__path__ = []
+    gen_mod = types.ModuleType(f"{root}.Common.General_Utilities")
+    psf_mod = types.ModuleType(f"{root}.Common.PSF_Preprocessing")
+    img_mod = types.ModuleType(f"{root}.Common.Image_Preprocessing")
+
+    def _sentinel(name: str):
+        def _fn(*args, **kwargs):
+            return (label, name, args, kwargs)
+        _fn.__name__ = f"{label}_{name}"
+        return _fn
+
+    sentinels = {
+        "padding": _sentinel("padding"),
+        "cropping": _sentinel("cropping"),
+        "odd_crop_around_center": _sentinel("odd_crop_around_center"),
+        "psf_preprocess": _sentinel("psf_preprocess"),
+        "condition_psf": _sentinel("condition_psf"),
+        "image_normalization": _sentinel("image_normalization"),
+        "validate_image": _sentinel("validate_image"),
+        "to_grayscale": _sentinel("to_grayscale"),
+    }
+
+    gen_mod.padding = sentinels["padding"]
+    gen_mod.cropping = sentinels["cropping"]
+    if odd_crop_in_general_utils:
+        gen_mod.odd_crop_around_center = sentinels["odd_crop_around_center"]
+
+    psf_mod.psf_preprocess = sentinels["psf_preprocess"]
+    psf_mod.condition_psf = sentinels["condition_psf"]
+
+    img_mod.image_normalization = sentinels["image_normalization"]
+    img_mod.validate_image = sentinels["validate_image"]
+    img_mod.to_grayscale = sentinels["to_grayscale"]
+    if not odd_crop_in_general_utils:
+        img_mod.odd_crop_around_center = sentinels["odd_crop_around_center"]
+
+    sys.modules[root] = root_mod
+    sys.modules[f"{root}.Common"] = common_mod
+    sys.modules[f"{root}.Common.General_Utilities"] = gen_mod
+    sys.modules[f"{root}.Common.PSF_Preprocessing"] = psf_mod
+    sys.modules[f"{root}.Common.Image_Preprocessing"] = img_mod
+    return sentinels
+
+
+def _import_fresh_common_module():
+    _clear_reconstruction_modules()
+    return importlib.import_module("Reconstruction._common")
+
+
 @pytest.fixture(autouse=True)
 def _restore_reconstruction_modules_after_test():
     snapshot = _snapshot_reconstruction_modules()
@@ -37,6 +116,16 @@ def _restore_reconstruction_modules_after_test():
         yield
     finally:
         _clear_reconstruction_modules()
+        sys.modules.update(snapshot)
+
+
+@pytest.fixture(autouse=True)
+def _restore_common_namespace_modules_after_test():
+    snapshot = _snapshot_common_namespace_modules()
+    try:
+        yield
+    finally:
+        _clear_common_namespace_modules()
         sys.modules.update(snapshot)
 
 
@@ -132,3 +221,112 @@ class TestImportSmoke:
 
         with pytest.raises(ImportError, match="requires the optional 'bm3d' dependency"):
             getattr(pkg, "PnPADMM")
+
+
+class TestCommonImportContract:
+
+    def test_common_prefers_remondo_namespace_when_available(self):
+        _clear_common_namespace_modules()
+        remondo = _install_common_namespace(
+            "RemondoPythonCore",
+            odd_crop_in_general_utils=True,
+            label="remondo",
+        )
+        shared = _install_common_namespace(
+            "Shared",
+            odd_crop_in_general_utils=False,
+            label="shared",
+        )
+
+        common = _import_fresh_common_module()
+
+        assert common.padding is remondo["padding"]
+        assert common.cropping is remondo["cropping"]
+        assert common.odd_crop_around_center is remondo["odd_crop_around_center"]
+        assert common.psf_preprocess is remondo["psf_preprocess"]
+        assert common.condition_psf is remondo["condition_psf"]
+        assert common.image_normalization is remondo["image_normalization"]
+        assert common.validate_image is remondo["validate_image"]
+        assert common.to_grayscale is remondo["to_grayscale"]
+        assert common.padding is not shared["padding"]
+
+    def test_common_falls_back_to_shared_namespace_when_remondo_absent(self):
+        _clear_common_namespace_modules()
+        shared = _install_common_namespace(
+            "Shared",
+            odd_crop_in_general_utils=False,
+            label="shared",
+        )
+
+        common = _import_fresh_common_module()
+
+        assert common.padding is shared["padding"]
+        assert common.cropping is shared["cropping"]
+        assert common.odd_crop_around_center is shared["odd_crop_around_center"]
+        assert common.psf_preprocess is shared["psf_preprocess"]
+        assert common.condition_psf is shared["condition_psf"]
+        assert common.image_normalization is shared["image_normalization"]
+        assert common.validate_image is shared["validate_image"]
+        assert common.to_grayscale is shared["to_grayscale"]
+
+    def test_common_missing_both_namespaces_raises_clear_error(self):
+        _clear_common_namespace_modules()
+
+        with pytest.raises(ImportError, match="shared preprocessing utilities"):
+            _import_fresh_common_module()
+
+    def test_root_solver_symbol_requires_shared_preprocessing_namespace(self):
+        _clear_reconstruction_modules()
+        _clear_common_namespace_modules()
+
+        pkg = importlib.import_module("Reconstruction")
+
+        with pytest.raises(ImportError, match="shared preprocessing utilities"):
+            getattr(pkg, "WienerDeconv")
+
+    def test_common_nested_import_failure_in_preferred_namespace_is_not_mislabeled(
+        self,
+        monkeypatch,
+    ):
+        _clear_common_namespace_modules()
+        _install_common_namespace(
+            "Shared",
+            odd_crop_in_general_utils=False,
+            label="shared",
+        )
+
+        original_import = builtins.__import__
+
+        def _failing_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "RemondoPythonCore.Common.General_Utilities":
+                raise ModuleNotFoundError(
+                    "No module named 'dependency_x'",
+                    name="dependency_x",
+                )
+            return original_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", _failing_import)
+
+        with pytest.raises(ImportError, match="dependency_x"):
+            _import_fresh_common_module()
+
+    def test_root_symbol_import_preserves_nested_common_import_error(self, monkeypatch):
+        _clear_reconstruction_modules()
+        _clear_common_namespace_modules()
+
+        original_import = builtins.__import__
+
+        def _failing_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "RemondoPythonCore.Common.General_Utilities":
+                raise ModuleNotFoundError(
+                    "No module named 'dependency_x'",
+                    name="dependency_x",
+                )
+            return original_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", _failing_import)
+
+        pkg = importlib.import_module("Reconstruction")
+
+        with pytest.raises(ImportError, match="dependency_x"):
+            getattr(pkg, "WienerDeconv")
