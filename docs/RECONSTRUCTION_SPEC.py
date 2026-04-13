@@ -1263,7 +1263,17 @@
 #      shared-utilities error on solver-symbol access.
 #   5. Nested shared-namespace import failures propagate their original
 #      ImportError rather than being mislabeled as namespace absence.
-#   4. Verify set_backend("cpu") works.
+#   6. Verify set_backend("cpu") works.
+#
+# ENVIRONMENT POLICY NOTE:
+#   The package metadata declares broad lower bounds (`python>=3.10`,
+#   `numpy>=1.24`, `scipy>=1.11`), but the numerical contract is only as
+#   strong as the environments that have been explicitly rechecked. Current
+#   validated core-profile baselines include:
+#     - Python 3.10.13 / NumPy 1.26.4 / SciPy 1.12.0
+#     - Python 3.11.15 / NumPy 2.4.3 / SciPy 1.17.1
+#   Wider version ranges remain compatibility targets until a broader matrix
+#   is exercised in CI or via pinned constraints.
 
 
 # ═════════════════════════════════════════════════════════════════════════════

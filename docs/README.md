@@ -348,6 +348,27 @@ cd ~/git/RemondoPythonCore
 python -m pytest -q external_reconstruction/tests --override-ini="addopts=-v --tb=short" -m monorepo
 ```
 
+### Validated numerical environments
+
+The package metadata currently allows broad lower-bound compatibility:
+
+- Python `>=3.10`
+- NumPy `>=1.24`
+- SciPy `>=1.11`
+
+That metadata should be treated as an installation compatibility floor, not as
+an already matrix-validated numerical contract.
+
+The core profile has been rechecked in these concrete environments:
+
+- Python `3.10.13`, NumPy `1.26.4`, SciPy `1.12.0`
+- Python `3.11.15`, NumPy `2.4.3`, SciPy `1.17.1`
+
+For numerically sensitive regression work, prefer one of those validated
+stacks or use a project constraints file. Wider NumPy/SciPy ranges should be
+treated as compatibility targets until a broader version matrix is exercised
+in CI.
+
 ### Import entry point
 
 `import Reconstruction` is the sole supported top-level entry point.
