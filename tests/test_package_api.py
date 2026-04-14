@@ -295,3 +295,53 @@ class TestWorkingDomainApiContract:
             cls = getattr(Reconstruction, name)
             obj = cls(image, psf, initialEstimate=initial)
             assert obj is not None, f"{name} should accept initialEstimate"
+
+
+class TestPublicDefaultParameters:
+
+    def test_wiener_constructor_htm_floor_default(self):
+        import Reconstruction
+
+        params = inspect.signature(Reconstruction.WienerDeconv).parameters
+        assert params["htm_floor_frac"].default == 0.01
+
+    def test_rl_deblur_default_parameters(self):
+        import Reconstruction
+
+        params = inspect.signature(Reconstruction.RLUnknownBoundary.deblur).parameters
+        assert params["num_iter"].default == 300
+        assert params["tol"].default == 1e-5
+
+    def test_landweber_deblur_default_tol(self):
+        import Reconstruction
+
+        params = inspect.signature(
+            Reconstruction.LandweberUnknownBoundary.deblur
+        ).parameters
+        assert params["tol"].default == 1e-5
+
+    def test_fista_deblur_default_tv_inner(self):
+        import Reconstruction
+
+        params = inspect.signature(Reconstruction.FISTADeconv.deblur).parameters
+        assert params["tv_inner"].default == 50
+
+    def test_chambolle_pock_default_lambda_tv(self):
+        import Reconstruction
+
+        params = inspect.signature(
+            Reconstruction.ChambollePockDeconv.deblur
+        ).parameters
+        assert params["lambda_tv"].default == 0.001
+        wrapper_params = inspect.signature(
+            Reconstruction.chambolle_pock_deblur
+        ).parameters
+        assert wrapper_params["lambda_tv"].default == 0.001
+
+    def test_admm_default_lambda_tv(self):
+        import Reconstruction
+
+        params = inspect.signature(Reconstruction.ADMMDeconv.deblur).parameters
+        assert params["lambda_tv"].default == 0.001
+        wrapper_params = inspect.signature(Reconstruction.admm_deblur).parameters
+        assert wrapper_params["lambda_tv"].default == 0.001

@@ -58,9 +58,9 @@ class RLUnknownBoundary(DeconvBase):
 
     def deblur(
         self,
-        num_iter: int = 100,
+        num_iter: int = 300,
         lambda_tv: float = 0.0002,
-        tol: float = 1e-6,
+        tol: float = 1e-5,
         min_iter: int = 5,
         check_every: int = 5,
         epsilon_division: float = 1e-12,

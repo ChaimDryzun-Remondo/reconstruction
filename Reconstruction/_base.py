@@ -248,7 +248,7 @@ class DeconvBase(ABC):
     htm_floor_frac : float, optional
         Relative floor fraction for H^T M clamping:
         ``floor = max(htm_floor_frac * max(H^T M), 1e-12)``.
-        Default 0.05 (5 % of the maximum).
+        Default 0.01 (1 % of the maximum).
     use_mask : bool, optional
         If ``True`` (default), build a binary mask M that equals 1 on the
         original image support Ω and 0 outside.  If ``False``, M = 1
@@ -275,7 +275,7 @@ class DeconvBase(ABC):
         padding_scale: float = 2.0,
         initialEstimate: Optional[np.ndarray] = None,
         apply_taper_on_padding_band: bool = False,
-        htm_floor_frac: float = 0.05,
+        htm_floor_frac: float = 0.01,
         use_mask: bool = True,
     ) -> None:
 
@@ -400,7 +400,7 @@ class DeconvBase(ABC):
         # prevents division blow-up there.
         #
         # Relative floor:  floor = max(htm_floor_frac × max(H^T M), 1e-12)
-        # Typical htm_floor_frac = 0.05 (5 % of the peak).
+        # Typical htm_floor_frac = 0.01 (1 % of the peak).
         fshape = self.full_shape
         htm_raw = backend.irfft2(
             self.conjPF * backend.rfft2(self.mask), s=fshape

@@ -214,7 +214,7 @@ class FISTADeconv(DeconvBase):
         min_iter: int = 10,
         check_every: int = 5,
         nonneg: Optional[bool] = None,
-        tv_inner: int = 30,
+        tv_inner: int = 50,
     ) -> np.ndarray:
         """
         Run FISTA with the selected regularization mode.

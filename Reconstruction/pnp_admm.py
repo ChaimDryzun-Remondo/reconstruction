@@ -447,7 +447,7 @@ def pnp_admm_deblur(
     image: np.ndarray,
     psf: np.ndarray,
     iters: int = 50,
-    lambda_tv: float = 0.01,
+    lambda_tv: float = 0.001,
     **kwargs,
 ) -> np.ndarray:
     """
@@ -470,7 +470,7 @@ def pnp_admm_deblur(
         Maximum ADMM iterations.  Default 50.
     lambda_tv : float, optional
         Regularization weight (controls BM3D σ via σ = sigma_scale · √(λ/ρ_z)).
-        Default 0.01.
+        Default 0.001.
     **kwargs
         Forwarded to the constructor and/or ``deblur()``.
 

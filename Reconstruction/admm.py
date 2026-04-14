@@ -560,7 +560,7 @@ class ADMMDeconv(DeconvBase):
     def deblur(
         self,
         num_iter: int = 300,
-        lambda_tv: float = 0.01,
+        lambda_tv: float = 0.001,
         tol: float = 1e-4,
         min_iter: int = 5,
         check_every: int = 1,
@@ -884,7 +884,7 @@ def admm_deblur(
     image: np.ndarray,
     psf: np.ndarray,
     iters: int = 300,
-    lambda_tv: float = 0.01,
+    lambda_tv: float = 0.001,
     **kwargs,
 ) -> np.ndarray:
     """

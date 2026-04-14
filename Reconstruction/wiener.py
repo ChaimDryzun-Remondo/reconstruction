@@ -198,7 +198,7 @@ class WienerDeconv(DeconvBase):
         padding_scale: float = 2.0,
         gamma: float = 1.0,
         initialEstimate: Optional[np.ndarray] = None,
-        htm_floor_frac: float = 0.05,
+        htm_floor_frac: float = 0.01,
     ) -> None:
 
         # ── Parameter validation ───────────────────────────────────────────

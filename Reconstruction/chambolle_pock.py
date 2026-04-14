@@ -272,7 +272,7 @@ class ChambollePockDeconv(DeconvBase):
     def deblur(
         self,
         num_iter: int = 200,
-        lambda_tv: float = 0.01,
+        lambda_tv: float = 0.001,
         tol: float = 1e-5,
         min_iter: int = 10,
         check_every: int = 5,
@@ -544,7 +544,7 @@ def chambolle_pock_deblur(
     image: np.ndarray,
     psf: np.ndarray,
     iters: int = 200,
-    lambda_tv: float = 0.01,
+    lambda_tv: float = 0.001,
     **kwargs,
 ) -> np.ndarray:
     """
@@ -563,7 +563,7 @@ def chambolle_pock_deblur(
     iters : int
         Maximum iterations.  Default 200.
     lambda_tv : float
-        TV regularization weight λ.  Default 0.01.
+        TV regularization weight λ.  Default 0.001.
     **kwargs
         Any parameter accepted by :class:`ChambollePockDeconv` or
         :meth:`~ChambollePockDeconv.deblur`

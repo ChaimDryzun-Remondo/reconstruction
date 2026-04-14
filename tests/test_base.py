@@ -216,10 +216,11 @@ class TestPSFPrecomputation:
         htm_np = np.asarray(deconv.HTM)
         htm_min = float(htm_np.min())
         htm_max = float(htm_np.max())
-        # Default htm_floor_frac = 0.05
-        assert htm_min >= 0.05 * htm_max, (
+        # Default htm_floor_frac = 0.01
+        floor = 0.01 * htm_max
+        assert htm_min >= floor - 1e-7, (
             f"HTM floor clamp violated: min={htm_min:.6f} < "
-            f"0.05 × max={htm_max:.6f} = {0.05 * htm_max:.6f}"
+            f"0.01 × max={htm_max:.6f} = {floor:.6f}"
         )
 
     def test_HTM_all_positive(self, deconv):

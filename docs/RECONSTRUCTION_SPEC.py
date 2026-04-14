@@ -421,7 +421,7 @@
 #       padding_scale: float = 2.0,
 #       initialEstimate: Optional[np.ndarray] = None,
 #       apply_taper_on_padding_band: bool = False,
-#       htm_floor_frac: float = 0.05,
+#       htm_floor_frac: float = 0.01,
 #       use_mask: bool = True,
 #   ) -> None:
 #
@@ -654,9 +654,9 @@
 #
 #   def deblur(
 #       self,
-#       num_iter: int = 100,
+#       num_iter: int = 300,
 #       lambda_tv: float = 0.0002,
-#       tol: float = 1e-6,
+#       tol: float = 1e-5,
 #       min_iter: int = 5,
 #       check_every: int = 5,
 #       epsilon_division: float = 1e-12,       # FIXED typo from original
@@ -754,7 +754,7 @@
 #       self,
 #       num_iter: int = 200,
 #       lambda_tv: float = 0.001,
-#       tol: float = 1e-6,
+#       tol: float = 1e-5,
 #       min_iter: int = 10,
 #       check_every: int = 5,
 #       step_size: Optional[float] = None,

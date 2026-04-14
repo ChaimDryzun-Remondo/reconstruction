@@ -269,18 +269,18 @@ tests/
 ```python
 # One-shot wrapper
 from Reconstruction import admm_deblur
-result = admm_deblur(image, psf, iters=100, lambda_tv=0.01)
+result = admm_deblur(image, psf, iters=100, lambda_tv=0.001)
 
 # Class-based (fine-grained control)
 from Reconstruction import ADMMDeconv
 solver = ADMMDeconv(image, psf, rho_v=32.0, rho_w=32.0)
-result = solver.deblur(num_iter=100, lambda_tv=0.01, TVnorm=2)
+result = solver.deblur(num_iter=100, lambda_tv=0.001, TVnorm=2)
 print(solver.cost_history[-1])   # final cost
 print(solver.last_rho_v)         # final adaptive penalty
 
 # PnP-ADMM (requires: pip install bm3d)
 from Reconstruction import pnp_admm_deblur
-result = pnp_admm_deblur(image, psf, iters=50, lambda_tv=0.01,
+result = pnp_admm_deblur(image, psf, iters=50, lambda_tv=0.001,
                           rho_z=2.0, sigma_scale=1.0)
 
 # GPU backend
