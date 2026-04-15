@@ -277,6 +277,7 @@ class ChambollePockDeconv(DeconvBase):
         min_iter: int = 10,
         check_every: int = 5,
         nonneg: Optional[bool] = None,
+        inverse_normalize: bool = False,
     ) -> np.ndarray:
         """
         Run the Condat-Vũ primal-dual forward-backward algorithm.
@@ -296,6 +297,10 @@ class ChambollePockDeconv(DeconvBase):
             Check convergence every this many iterations.
         nonneg : bool or None
             Non-negativity enforcement.  ``None`` uses the constructor value.
+        inverse_normalize : bool
+            If ``True``, map the returned cropped grayscale result back to the
+            observed image's odd-cropped raw grayscale units. Internal solver
+            state remains in the package working domain.
 
         Returns
         -------
@@ -481,7 +486,11 @@ class ChambollePockDeconv(DeconvBase):
         else:
             self._log_no_convergence(num_iter, tol)
 
-        return self._crop_and_return(x, last_finite=last_finite)
+        return self._crop_and_return(
+            x,
+            last_finite=last_finite,
+            inverse_normalize=inverse_normalize,
+        )
 
     # ══════════════════════════════════════════════════════════════════════
     # Dual projection
@@ -545,6 +554,7 @@ def chambolle_pock_deblur(
     psf: np.ndarray,
     iters: int = 200,
     lambda_tv: float = 0.001,
+    inverse_normalize: bool = False,
     **kwargs,
 ) -> np.ndarray:
     """
@@ -564,6 +574,9 @@ def chambolle_pock_deblur(
         Maximum iterations.  Default 200.
     lambda_tv : float
         TV regularization weight λ.  Default 0.001.
+    inverse_normalize : bool
+        If ``True``, map the returned cropped grayscale result back to the
+        observed image's odd-cropped raw grayscale units.
     **kwargs
         Any parameter accepted by :class:`ChambollePockDeconv` or
         :meth:`~ChambollePockDeconv.deblur`
@@ -583,5 +596,6 @@ def chambolle_pock_deblur(
         explicit_deblur_kwargs={
             "num_iter": iters,
             "lambda_tv": lambda_tv,
+            "inverse_normalize": inverse_normalize,
         },
     )

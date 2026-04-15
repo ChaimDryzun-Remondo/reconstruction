@@ -556,7 +556,20 @@
 #   def _crop_and_return(self, x_k: xp.ndarray) -> np.ndarray:
 #       """Store final state, crop to (self.h, self.w), move to CPU."""
 #       self.estimated_image = x_k.copy()
-#       return _to_numpy(cropping(x_k, (self.h, self.w)))
+#       result = _to_numpy(cropping(x_k, (self.h, self.w)))
+#       if inverse_normalize:
+#           if gray_max > gray_min:
+#               result = gray_min + result * (gray_max - gray_min)
+#           else:
+#               # constant-image fallback already lives in raw grayscale units
+#               result = result
+#       return result
+#
+#   OUTPUT-FINALIZATION CONTRACT:
+#     ``inverse_normalize`` is an output-only public flag on ``deblur()``.
+#     It remaps only the returned cropped CPU array. Internal padded-canvas
+#     solver state (``self.estimated_image``) always remains in the package
+#     working domain established in Step 4 above.
 #
 #   FAILURE-STATE CONTRACT:
 #     Numerical failure should preserve a finite self.estimated_image.

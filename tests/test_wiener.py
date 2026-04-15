@@ -209,6 +209,28 @@ class TestWienerDeconvConstruction:
         ).deblur(alpha=0.01)
         np.testing.assert_allclose(out_true, out_false, atol=1e-7)
 
+    def test_inverse_normalize_changes_only_output_scale(self, blurred_clean, psf):
+        w = WienerDeconv(blurred_clean, psf, normalize_image=True)
+        out_working = w.deblur(alpha=0.01, inverse_normalize=False)
+        out_raw = w.deblur(alpha=0.01, inverse_normalize=True)
+        expected_raw = (
+            out_working.astype(np.float64) * (w._gray_max - w._gray_min) + w._gray_min
+        ).astype(out_raw.dtype)
+
+        np.testing.assert_allclose(out_raw, expected_raw, atol=1e-6)
+
+    def test_inverse_normalize_is_independent_of_normalize_image_compat_flag(
+        self, blurred_clean, psf
+    ):
+        out_true = WienerDeconv(
+            blurred_clean, psf, normalize_image=True
+        ).deblur(alpha=0.01, inverse_normalize=True)
+        out_false = WienerDeconv(
+            blurred_clean, psf, normalize_image=False
+        ).deblur(alpha=0.01, inverse_normalize=True)
+
+        np.testing.assert_allclose(out_true, out_false, atol=1e-7)
+
 
 class TestWienerPSFContract:
 
@@ -619,6 +641,11 @@ class TestWienerDeblurWrapper:
     def test_kwargs_split_alpha_to_deblur(self, blurred_clean, psf):
         """alpha is a deblur param; constructor must not receive it."""
         out = wiener_deblur(blurred_clean, psf, alpha=0.005)
+        assert isinstance(out, np.ndarray)
+
+    def test_kwargs_split_inverse_normalize_to_deblur(self, blurred_clean, psf):
+        """inverse_normalize is a deblur param; constructor must not receive it."""
+        out = wiener_deblur(blurred_clean, psf, alpha=0.005, inverse_normalize=True)
         assert isinstance(out, np.ndarray)
 
     def test_gamma_forwarded_to_init(self, noisy_blurred, psf):

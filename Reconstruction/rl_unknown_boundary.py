@@ -66,6 +66,7 @@ class RLUnknownBoundary(DeconvBase):
         epsilon_division: float = 1e-12,
         epsilon_positivity: float = 1e-8,
         tv_on_full_canvas: bool = True,
+        inverse_normalize: bool = False,
     ) -> np.ndarray:
         """
         Run unknown-boundary RL with optional multiplicative TV correction.
@@ -91,6 +92,10 @@ class RLUnknownBoundary(DeconvBase):
             If ``False``, TV correction is masked to the observed region Ω.
             In both cases the correction comes from the Neumann-family
             multiplicative TV operator rather than a periodic gradient pair.
+        inverse_normalize : bool
+            If ``True``, map the returned cropped grayscale result back to the
+            observed image's odd-cropped raw grayscale units. Internal solver
+            state remains in the package working domain.
 
         Returns
         -------
@@ -173,7 +178,11 @@ class RLUnknownBoundary(DeconvBase):
             self._log_no_convergence(num_iter, tol)
 
         # ── Step 8: Store, crop, and return ──────────────────────────────
-        return self._crop_and_return(x_k, last_finite=last_finite)
+        return self._crop_and_return(
+            x_k,
+            last_finite=last_finite,
+            inverse_normalize=inverse_normalize,
+        )
 
 
 def rl_deblur_unknown_boundary(

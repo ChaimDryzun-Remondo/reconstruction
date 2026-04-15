@@ -277,6 +277,20 @@ class TestWorkingDomainApiContract:
         params = inspect.signature(Reconstruction.WienerDeconv).parameters
         assert "normalize_image" in params
 
+    def test_inverse_normalize_is_not_a_constructor_kwarg(self):
+        """inverse_normalize is output-only and must not appear on constructors."""
+        import Reconstruction
+
+        for name in (
+            "WienerDeconv",
+            "RLUnknownBoundary",
+            "LandweberUnknownBoundary",
+            "ADMMDeconv",
+            "TVAL3Deconv",
+        ):
+            params = inspect.signature(getattr(Reconstruction, name)).parameters
+            assert "inverse_normalize" not in params
+
     def test_core_classes_accept_initial_estimate_constructor_kwarg(self):
         """initialEstimate remains supported at the root-class constructor level."""
         import Reconstruction
@@ -319,6 +333,22 @@ class TestPublicDefaultParameters:
             Reconstruction.LandweberUnknownBoundary.deblur
         ).parameters
         assert params["tol"].default == 1e-5
+
+    def test_inverse_normalize_default_is_false_on_public_deblur_methods(self):
+        import Reconstruction
+
+        for method in (
+            Reconstruction.WienerDeconv.deblur,
+            Reconstruction.RLUnknownBoundary.deblur,
+            Reconstruction.LandweberUnknownBoundary.deblur,
+            Reconstruction.FISTADeconv.deblur,
+            Reconstruction.ChambollePockDeconv.deblur,
+            Reconstruction.ADMMDeconv.deblur,
+            Reconstruction.TVAL3Deconv.deblur,
+            Reconstruction.REDDeconv.deblur,
+        ):
+            params = inspect.signature(method).parameters
+            assert params["inverse_normalize"].default is False
 
     def test_fista_deblur_default_tv_inner(self):
         import Reconstruction

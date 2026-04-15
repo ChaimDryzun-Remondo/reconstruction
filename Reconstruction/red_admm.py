@@ -244,6 +244,7 @@ class REDDeconv(ADMMDeconv):
         check_every: int = 1,
         nonneg: Optional[bool] = None,
         verbose: bool = False,
+        inverse_normalize: bool = False,
     ) -> np.ndarray:
         """
         Run RED-ADMM deconvolution.
@@ -268,6 +269,10 @@ class REDDeconv(ADMMDeconv):
             Override constructor ``nonneg`` flag.
         verbose : bool
             Log per-iteration details at DEBUG level.
+        inverse_normalize : bool
+            If ``True``, map the returned cropped grayscale result back to the
+            observed image's odd-cropped raw grayscale units. Internal solver
+            state remains in the package working domain.
 
         Returns
         -------
@@ -291,6 +296,7 @@ class REDDeconv(ADMMDeconv):
             check_every=check_every,
             nonneg=nonneg,
             verbose=verbose,
+            inverse_normalize=inverse_normalize,
         )
 
     # ══════════════════════════════════════════════════════════════════════
@@ -457,6 +463,7 @@ def red_deblur(
     iters: int = 50,
     lambda_reg: float = 0.01,
     sigma: float = 0.05,
+    inverse_normalize: bool = False,
     **kwargs,
 ) -> np.ndarray:
     """
@@ -477,6 +484,9 @@ def red_deblur(
         Regularization weight λ.  Default 0.01.
     sigma : float, optional
         Fixed BM3D denoiser noise level σ.  Default 0.05.
+    inverse_normalize : bool, optional
+        If ``True``, map the returned cropped grayscale result back to the
+        observed image's odd-cropped raw grayscale units.
     **kwargs
         Forwarded to the constructor and/or ``deblur()``.
 
@@ -500,5 +510,6 @@ def red_deblur(
         explicit_deblur_kwargs={
             "num_iter": iters,
             "lambda_reg": lambda_reg,
+            "inverse_normalize": inverse_normalize,
         },
     )

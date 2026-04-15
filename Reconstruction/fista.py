@@ -215,6 +215,7 @@ class FISTADeconv(DeconvBase):
         check_every: int = 5,
         nonneg: Optional[bool] = None,
         tv_inner: int = 50,
+        inverse_normalize: bool = False,
     ) -> np.ndarray:
         """
         Run FISTA with the selected regularization mode.
@@ -238,6 +239,10 @@ class FISTADeconv(DeconvBase):
         tv_inner : int
             Inner Chambolle iterations for the TV proximal operator.
             Ignored for ``reg_mode != "TV"``.
+        inverse_normalize : bool
+            If ``True``, map the returned cropped grayscale result back to the
+            observed image's odd-cropped raw grayscale units. Internal solver
+            state remains in the package working domain.
 
         Returns
         -------
@@ -407,7 +412,11 @@ class FISTADeconv(DeconvBase):
         else:
             self._log_no_convergence(num_iter, tol)
 
-        return self._crop_and_return(x_k, last_finite=last_finite)
+        return self._crop_and_return(
+            x_k,
+            last_finite=last_finite,
+            inverse_normalize=inverse_normalize,
+        )
 
     # ══════════════════════════════════════════════════════════════════════
     # Proximal interface (overridable for PnP-FISTA extension)
@@ -575,6 +584,7 @@ def fista_deblur(
     iters: int = 200,
     lambda_reg: float = 0.001,
     reg_mode: str = "TV",
+    inverse_normalize: bool = False,
     **kwargs,
 ) -> np.ndarray:
     """
@@ -596,6 +606,9 @@ def fista_deblur(
         Regularization weight λ.
     reg_mode : {"TV", "L1", "L1_wavelet"}
         Regularizer choice.
+    inverse_normalize : bool
+        If ``True``, map the returned cropped grayscale result back to the
+        observed image's odd-cropped raw grayscale units.
     **kwargs
         Any parameter accepted by :class:`FISTADeconv` or
         :meth:`~FISTADeconv.deblur` (e.g. ``padding_scale``, ``tv_inner``).
@@ -616,5 +629,6 @@ def fista_deblur(
             "num_iter": iters,
             "lambda_reg": lambda_reg,
             "reg_mode": reg_mode,
+            "inverse_normalize": inverse_normalize,
         },
     )

@@ -31,6 +31,20 @@ outside `[0, 1]` when the supplied initial estimate lies outside the observed
 image range. For constant images, both the image working domain and the
 `initialEstimate` remain in grayscale raw units.
 
+Returned outputs are, by default, left in that same internal working domain.
+The public `deblur()` methods also expose `inverse_normalize=False` as an
+output-only flag:
+
+- non-degenerate image + `inverse_normalize=False`: return working-domain
+  grayscale values
+- non-degenerate image + `inverse_normalize=True`: return the odd-cropped
+  grayscale output mapped back to the observed image's raw-unit grayscale scale
+- constant image: the working domain is already raw grayscale units, so
+  `inverse_normalize=True` is a no-op
+
+This flag changes only the returned cropped array. Persistent solver state
+remains in the package working domain.
+
 ## Boundary Handling
 
 The package does not currently expose a single public `boundary_policy` API.

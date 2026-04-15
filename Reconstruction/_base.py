@@ -315,6 +315,9 @@ class DeconvBase(ABC):
         gray = image_normalization(image=gray, bit_depth=1, is_int=False)
         if gray_max == gray_min:
             gray = gray_working_raw.copy()
+        self._inverse_normalize_enabled: bool = gray_max > gray_min
+        self._gray_min: float = gray_min
+        self._gray_max: float = gray_max
 
         # ── Step 5: Store original size — SINGLE assignment ────────────────
         # Note: the reference RL file accidentally assigns self.h, self.w
@@ -550,6 +553,7 @@ class DeconvBase(ABC):
         x_k: "backend.xp.ndarray",
         *,
         last_finite: Optional["backend.xp.ndarray"] = None,
+        inverse_normalize: bool = False,
     ) -> np.ndarray:
         """
         Store the final state, crop to the original FOV, and transfer to CPU.
@@ -561,6 +565,10 @@ class DeconvBase(ABC):
         last_finite : xp.ndarray or None, optional
             Most recent verified-finite iterate.  Used to preserve solver state
             if ``x_k`` is non-finite.
+        inverse_normalize : bool, optional
+            If ``True``, map the returned cropped grayscale result back to the
+            observed image's odd-cropped raw grayscale units. Internal solver
+            state remains in the package working domain.
 
         Returns
         -------
@@ -579,12 +587,50 @@ class DeconvBase(ABC):
         )
         self.estimated_image = x_k.copy()
         result = cropping(backend._to_numpy(x_k), (self.h, self.w))
+        result = self._finalize_output(
+            result,
+            inverse_normalize=inverse_normalize,
+        )
         if not bool(np.isfinite(result).all()):
             self._restore_last_finite_state(last_finite)
             logger.warning("Non-finite values detected in cropped return array.")
             raise FloatingPointError(
                 "Non-finite values detected in cropped return array."
             )
+        return result
+
+    def _inverse_normalize_output(self, result: np.ndarray) -> np.ndarray:
+        """
+        Map a cropped working-domain result back to raw grayscale units.
+
+        For non-degenerate observed images the current package working domain is
+        the image-derived affine map to [0, 1]. For constant-image fallback
+        paths the working domain is already raw grayscale units, so the input
+        is returned unchanged.
+        """
+        if not self._inverse_normalize_enabled:
+            return result
+
+        mapped = (
+            result.astype(np.float64, copy=False) * (self._gray_max - self._gray_min)
+            + self._gray_min
+        )
+        return mapped.astype(result.dtype, copy=False)
+
+    def _finalize_output(
+        self,
+        result: np.ndarray,
+        *,
+        inverse_normalize: bool = False,
+    ) -> np.ndarray:
+        """
+        Finalize a cropped CPU result before returning it to the caller.
+
+        Internal solver state remains in the package working domain regardless
+        of the output representation requested here.
+        """
+        if inverse_normalize:
+            result = self._inverse_normalize_output(result)
         return result
 
     def _check_convergence(

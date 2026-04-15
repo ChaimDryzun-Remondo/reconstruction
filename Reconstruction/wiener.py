@@ -366,6 +366,7 @@ class WienerDeconv(DeconvBase):
     def deblur(
         self,
         alpha: Optional[Union[float, np.ndarray]] = None,
+        inverse_normalize: bool = False,
     ) -> np.ndarray:
         """
         Apply the Wiener filter and return the deblurred image.
@@ -393,6 +394,12 @@ class WienerDeconv(DeconvBase):
             Regularisation parameter.  If None (default), α is estimated
             automatically from the noise level.  For Spectrum mode an array of
             shape ``(full_shape[0], full_shape[1]//2+1)`` may be supplied.
+        inverse_normalize : bool
+            If ``True``, map the returned cropped grayscale result back to the
+            observed image's odd-cropped raw grayscale units. This is
+            independent of the constructor-level ``normalize_image``
+            compatibility flag; internal Wiener computation still uses the
+            package working domain.
 
         Returns
         -------
@@ -463,7 +470,7 @@ class WienerDeconv(DeconvBase):
         x: "backend.xp.ndarray" = backend.irfft2(X_F, s=self.full_shape)
 
         # ── Step 4: Crop and return ───────────────────────────────────────
-        return self._crop_and_return(x)
+        return self._crop_and_return(x, inverse_normalize=inverse_normalize)
 
     # ── Properties ────────────────────────────────────────────────────────
 

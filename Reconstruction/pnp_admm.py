@@ -448,6 +448,7 @@ def pnp_admm_deblur(
     psf: np.ndarray,
     iters: int = 50,
     lambda_tv: float = 0.001,
+    inverse_normalize: bool = False,
     **kwargs,
 ) -> np.ndarray:
     """
@@ -471,6 +472,9 @@ def pnp_admm_deblur(
     lambda_tv : float, optional
         Regularization weight (controls BM3D σ via σ = sigma_scale · √(λ/ρ_z)).
         Default 0.001.
+    inverse_normalize : bool, optional
+        If ``True``, map the returned cropped grayscale result back to the
+        observed image's odd-cropped raw grayscale units.
     **kwargs
         Forwarded to the constructor and/or ``deblur()``.
 
@@ -493,5 +497,6 @@ def pnp_admm_deblur(
         explicit_deblur_kwargs={
             "num_iter": iters,
             "lambda_tv": lambda_tv,
+            "inverse_normalize": inverse_normalize,
         },
     )

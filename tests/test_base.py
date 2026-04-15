@@ -34,7 +34,7 @@ class _TestDeconv(DeconvBase):
     """Trivial subclass: deblur() returns the initial estimate unchanged."""
 
     def deblur(self, **kwargs) -> np.ndarray:
-        return self._crop_and_return(self.estimated_image)
+        return self._crop_and_return(self.estimated_image, **kwargs)
 
 
 def _to_expected_working_domain(image: np.ndarray) -> np.ndarray:
@@ -489,6 +489,43 @@ class TestWorkingDomainContract:
         assert float(result.min()) >= 0.0
         assert float(result.max()) <= 1.0
 
+    def test_inverse_normalize_restores_grayscale_raw_units_for_nondegenerate_input(
+        self, gaussian_psf
+    ):
+        image = np.linspace(5.0, 55.0, 6 * 8 * 3, dtype=np.float64).reshape(6, 8, 3)
+        deconv = _TestDeconv(image, gaussian_psf)
+        raw_gray = base_module.odd_crop_around_center(
+            base_module.to_grayscale(image), (deconv.h, deconv.w)
+        ).astype(np.float64)
+
+        result = deconv.deblur(inverse_normalize=True)
+
+        np.testing.assert_allclose(result, raw_gray.astype(result.dtype), atol=1e-6)
+
+    def test_inverse_normalize_is_noop_for_constant_image_fallback(self, gaussian_psf):
+        image = np.full((6, 8, 3), 5.0, dtype=np.float64)
+        deconv = _TestDeconv(image, gaussian_psf)
+
+        result_default = deconv.deblur()
+        result_inverse = deconv.deblur(inverse_normalize=True)
+
+        np.testing.assert_allclose(result_inverse, result_default, atol=1e-6)
+
+    def test_inverse_normalize_does_not_change_internal_estimated_image_scale(
+        self, gaussian_psf
+    ):
+        image = np.linspace(10.0, 30.0, 6 * 8, dtype=np.float64).reshape(6, 8)
+        deconv = _TestDeconv(image, gaussian_psf)
+
+        deconv.deblur(inverse_normalize=True)
+        stored = np.asarray(deconv.estimated_image)[
+            (deconv.full_shape[0] - deconv.h) // 2:(deconv.full_shape[0] + deconv.h) // 2,
+            (deconv.full_shape[1] - deconv.w) // 2:(deconv.full_shape[1] + deconv.w) // 2,
+        ]
+        expected = _to_expected_working_domain(image)
+
+        np.testing.assert_allclose(stored, expected, atol=1e-6)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 5. deblur() — abstract method and _TestDeconv implementation
@@ -647,6 +684,23 @@ class TestCropAndReturn:
         assert est_min > 0.0, (
             "estimated_image was mutated when x_k changed — not a copy"
         )
+
+    def test_inverse_normalize_maps_cropped_output_only(self, gaussian_psf):
+        image = np.linspace(10.0, 30.0, 6 * 8, dtype=np.float64).reshape(6, 8)
+        deconv = _TestDeconv(image, gaussian_psf)
+        x_k = np.full(deconv.full_shape, np.float32(0.25), dtype=np.float32)
+
+        result = deconv._crop_and_return(x_k, inverse_normalize=True)
+
+        expected_val = np.float32(
+            deconv._gray_min + 0.25 * (deconv._gray_max - deconv._gray_min)
+        )
+        np.testing.assert_allclose(
+            result,
+            np.full((deconv.h, deconv.w), expected_val, dtype=result.dtype),
+            atol=1e-6,
+        )
+        np.testing.assert_array_equal(np.asarray(deconv.estimated_image), x_k)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -94,6 +94,7 @@ class LandweberUnknownBoundary(DeconvBase):
         precondition: bool = True,
         tv_n_inner: int = 50,
         adaptive_restart: bool = True,
+        inverse_normalize: bool = False,
     ) -> np.ndarray:
         """
         Run FISTA-accelerated preconditioned Landweber with proximal TV.
@@ -130,6 +131,10 @@ class LandweberUnknownBoundary(DeconvBase):
         adaptive_restart : bool
             Apply O'Donoghue-Candès velocity restart: when consecutive
             iterate steps reverse direction, reset momentum.
+        inverse_normalize : bool
+            If ``True``, map the returned cropped grayscale result back to the
+            observed image's odd-cropped raw grayscale units. Internal solver
+            state remains in the package working domain.
 
         Returns
         -------
@@ -301,7 +306,11 @@ class LandweberUnknownBoundary(DeconvBase):
             self._log_no_convergence(num_iter, tol)
 
         # ── Store, crop, and return ───────────────────────────────────────
-        return self._crop_and_return(x_k, last_finite=last_finite)
+        return self._crop_and_return(
+            x_k,
+            last_finite=last_finite,
+            inverse_normalize=inverse_normalize,
+        )
 
 
 def landweber_deblur_unknown_boundary(

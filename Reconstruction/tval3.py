@@ -418,6 +418,7 @@ class TVAL3Deconv(DeconvBase):
         burn_in_frac: Optional[float] = None,
         TVnorm: Optional[int] = None,
         verbose: bool = False,
+        inverse_normalize: bool = False,
     ) -> np.ndarray:
         """
         Run the TVAL3 v=Hx split ADMM algorithm.
@@ -444,6 +445,10 @@ class TVAL3Deconv(DeconvBase):
             Override constructor ``TVnorm``.
         verbose : bool
             Log per-iteration details at DEBUG level (use_mask=True by default).
+        inverse_normalize : bool
+            If ``True``, map the returned cropped grayscale result back to the
+            observed image's odd-cropped raw grayscale units. Internal solver
+            state remains in the package working domain.
 
         Returns
         -------
@@ -731,6 +736,7 @@ class TVAL3Deconv(DeconvBase):
         return self._crop_and_return(
             u.astype(backend.xp.float32),
             last_finite=last_finite.astype(backend.xp.float32),
+            inverse_normalize=inverse_normalize,
         )
 
     # ══════════════════════════════════════════════════════════════════════
@@ -757,6 +763,7 @@ def tval3_deblur(
     psf: np.ndarray,
     iters: int = 300,
     lambda_tv: float = 0.01,
+    inverse_normalize: bool = False,
     **kwargs,
 ) -> np.ndarray:
     """
@@ -775,6 +782,9 @@ def tval3_deblur(
         Maximum ADMM iterations.
     lambda_tv : float
         TV regularization weight.
+    inverse_normalize : bool
+        If ``True``, map the returned cropped grayscale result back to the
+        observed image's odd-cropped raw grayscale units.
     **kwargs
         Forwarded to constructor and/or ``deblur()``.
 
@@ -792,5 +802,6 @@ def tval3_deblur(
         explicit_deblur_kwargs={
             "num_iter": iters,
             "lambda_tv": lambda_tv,
+            "inverse_normalize": inverse_normalize,
         },
     )

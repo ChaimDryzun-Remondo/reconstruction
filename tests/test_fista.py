@@ -309,6 +309,19 @@ class TestDeconvolutionQuality:
         assert float(np.max(result)) < 10.0, f"max={np.max(result):.2f} too large"
         assert float(np.min(result)) >= 0.0, "nonneg violated"
 
+    def test_inverse_normalize_remaps_output_scale_only(self, blurred, small_psf):
+        solver_working = FISTADeconv(blurred, small_psf)
+        solver_raw = FISTADeconv(blurred, small_psf)
+        out_working = solver_working.deblur(num_iter=5, inverse_normalize=False)
+        out_raw = solver_raw.deblur(num_iter=5, inverse_normalize=True)
+        expected_raw = (
+            out_working.astype(np.float64)
+            * (solver_working._gray_max - solver_working._gray_min)
+            + solver_working._gray_min
+        ).astype(out_raw.dtype)
+
+        np.testing.assert_allclose(out_raw, expected_raw, atol=1e-5)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 6. Momentum parameter t_k

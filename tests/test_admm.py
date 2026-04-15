@@ -220,6 +220,27 @@ class TestDeconvolutionQuality:
         assert float(np.max(result)) < 2.0, "Output values unreasonably large"
         assert float(np.min(result)) >= 0.0
 
+    def test_inverse_normalize_remaps_output_scale_only(self, blurred, small_psf):
+        solver_working = ADMMDeconv(
+            blurred, small_psf, rho_v=16.0, rho_w=16.0, nonneg=True
+        )
+        solver_raw = ADMMDeconv(
+            blurred, small_psf, rho_v=16.0, rho_w=16.0, nonneg=True
+        )
+        out_working = solver_working.deblur(
+            num_iter=5, lambda_tv=0.01, inverse_normalize=False
+        )
+        out_raw = solver_raw.deblur(
+            num_iter=5, lambda_tv=0.01, inverse_normalize=True
+        )
+        expected_raw = (
+            out_working.astype(np.float64)
+            * (solver_working._gray_max - solver_working._gray_min)
+            + solver_working._gray_min
+        ).astype(out_raw.dtype)
+
+        np.testing.assert_allclose(out_raw, expected_raw, atol=1e-5)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 5. use_mask
