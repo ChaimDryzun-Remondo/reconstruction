@@ -111,4 +111,19 @@ The four tests were rewritten (not deleted) to assert real properties
 of the current package layout.  See `tests/test_import_smoke.py` and
 `docs/README.md` (*Import entry point* section) for the record.
 
-Baseline is now **656 passed, 0 failed**.
+Baseline (core-profile cold checkout, 2026-04-23, Pre-Sprint-0):
+**532 passed, 6 failed, 3 skipped, 24 deselected of 563 total tests**.
+
+The default invocation filters to the `core` profile via `pyproject.toml:38`'s
+`-m 'not imaging and not pnp and not monorepo'` addopts.  The 24 deselected
+tests are split across three optional profiles: `imaging` (20 tests — needs
+`scikit-image` + `matplotlib`), `pnp` (4 tests — needs `bm3d`), and `monorepo`
+(marker defined for tests requiring the full `RemondoPythonCore.Common`
+environment; currently 0 tests carry it).  See `pyproject.toml:38–44` for the
+marker declarations and `docs/README.md:347–362` for the alternate invocations.
+
+An earlier statement here claimed "656 passed, 0 failed"; that figure could
+not be reproduced against any invocation of the current test tree.  See
+`docs/refactoring-audit/NOTES.md` §"Sprint 0 investigation outcomes" for the
+analysis.  The 6 failures and 3 skipped are the Sprint 0 pre-existing
+failures tracked in `NOTES.md` findings F2 and F3.
