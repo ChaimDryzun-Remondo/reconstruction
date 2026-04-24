@@ -26,7 +26,7 @@ class TestBM3DDenoiseRangeMode:
             return image + 0.25
 
         monkeypatch.setattr(denoise_utils, "_HAS_BM3D", True)
-        monkeypatch.setattr(denoise_utils, "_bm3d_func", fake_bm3d)
+        monkeypatch.setattr(denoise_utils, "_bm3d_func", fake_bm3d, raising=False)
 
         arr = backend.xp.array([[0.0, 0.5], [1.0, 0.75]], dtype=backend.xp.float64)
         result = denoise_utils.bm3d_denoise(arr, sigma=0.1, profile="lc", range_mode="affine")
@@ -54,7 +54,7 @@ class TestBM3DDenoiseRangeMode:
             return image * 0.5
 
         monkeypatch.setattr(denoise_utils, "_HAS_BM3D", True)
-        monkeypatch.setattr(denoise_utils, "_bm3d_func", fake_bm3d)
+        monkeypatch.setattr(denoise_utils, "_bm3d_func", fake_bm3d, raising=False)
 
         arr = backend.xp.array([[10.0, 12.0], [14.0, 20.0]], dtype=backend.xp.float64)
         result = denoise_utils.bm3d_denoise(arr, sigma=2.0, range_mode="affine")
@@ -79,7 +79,7 @@ class TestBM3DDenoiseRangeMode:
             return image + 0.5
 
         monkeypatch.setattr(denoise_utils, "_HAS_BM3D", True)
-        monkeypatch.setattr(denoise_utils, "_bm3d_func", fake_bm3d)
+        monkeypatch.setattr(denoise_utils, "_bm3d_func", fake_bm3d, raising=False)
 
         arr = backend.xp.array([[-2.0, 0.0], [3.0, 5.0]], dtype=backend.xp.float64)
         result = denoise_utils.bm3d_denoise(arr, sigma=0.3, range_mode="none")
