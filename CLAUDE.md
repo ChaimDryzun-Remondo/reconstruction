@@ -111,8 +111,8 @@ The four tests were rewritten (not deleted) to assert real properties
 of the current package layout.  See `tests/test_import_smoke.py` and
 `docs/README.md` (*Import entry point* section) for the record.
 
-Baseline (core-profile cold checkout, 2026-04-23, Pre-Sprint-0):
-**532 passed, 6 failed, 3 skipped, 24 deselected of 563 total tests**.
+Baseline (core-profile cold checkout on `audit-2025-q2`, Post-Sprint-0):
+**535 passed, 3 xfailed, 3 skipped, 24 deselected of 563 total tests, in ~11 s**.
 
 The default invocation filters to the `core` profile via `pyproject.toml:38`'s
 `-m 'not imaging and not pnp and not monorepo'` addopts.  The 24 deselected
@@ -122,8 +122,22 @@ tests are split across three optional profiles: `imaging` (20 tests — needs
 environment; currently 0 tests carry it).  See `pyproject.toml:38–44` for the
 marker declarations and `docs/README.md:347–362` for the alternate invocations.
 
-An earlier statement here claimed "656 passed, 0 failed"; that figure could
-not be reproduced against any invocation of the current test tree.  See
-`docs/refactoring-audit/NOTES.md` §"Sprint 0 investigation outcomes" for the
-analysis.  The 6 failures and 3 skipped are the Sprint 0 pre-existing
-failures tracked in `NOTES.md` findings F2 and F3.
+History:
+- An earlier statement in this file claimed "656 passed, 0 failed"; that
+  figure could not be reproduced against any invocation of the current test
+  tree and was superseded by the Pre-Sprint-0 core-profile baseline during
+  Sprint 0 commit W1 (parent `ff2d5bb`, submodule `776d178`).  Full
+  investigation at `../docs/refactoring-audit/NOTES.md` §"Sprint 0
+  investigation outcomes" 2026-04-23 W1 entry.
+- Pre-Sprint-0 baseline (2026-04-23): 532 passed, 6 failed, 3 skipped,
+  24 deselected of 563 total tests, in 11.26 s.  The 6 failures were
+  3 `_bm3d_func` drift + 3 `Shared.Common` fallback-contract failures.
+- Sprint 0 commit W5 (submodule `804fdea`) cleared the 3 `_bm3d_func`
+  failures into passes by making `monkeypatch.setattr` non-raising.
+- Sprint 0 commit W6 (submodule `ab354c7`) converted the 3 `Shared.Common`
+  failures to xfailed pending Sprint 5 Q2 removal.
+- Sprint 0 commit W7a (this commit; submodule SHA to be recorded in the
+  parent-repo commit message) updates this baseline line to the
+  Post-Sprint-0 state and aligns its wording to the canonical format used
+  in the repo-root `CLAUDE.md` §"Running the test suites" section and the
+  `NOTES.md` §"Consolidated baseline for gate comparison" table.
