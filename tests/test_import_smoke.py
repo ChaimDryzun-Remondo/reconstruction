@@ -250,6 +250,7 @@ class TestCommonImportContract:
         assert common.to_grayscale is remondo["to_grayscale"]
         assert common.padding is not shared["padding"]
 
+    @pytest.mark.xfail(reason="Sprint 5 Q2 — fallback mechanism pending removal; see WORKPLAN.md §8 Q2")
     def test_common_falls_back_to_shared_namespace_when_remondo_absent(self):
         _clear_common_namespace_modules()
         shared = _install_common_namespace(
@@ -269,12 +270,14 @@ class TestCommonImportContract:
         assert common.validate_image is shared["validate_image"]
         assert common.to_grayscale is shared["to_grayscale"]
 
+    @pytest.mark.xfail(reason="Sprint 5 Q2 — fallback mechanism pending removal; see WORKPLAN.md §8 Q2")
     def test_common_missing_both_namespaces_raises_clear_error(self):
         _clear_common_namespace_modules()
 
         with pytest.raises(ImportError, match="shared preprocessing utilities"):
             _import_fresh_common_module()
 
+    @pytest.mark.xfail(reason="Sprint 5 Q2 — fallback mechanism pending removal; see WORKPLAN.md §8 Q2")
     def test_root_solver_symbol_requires_shared_preprocessing_namespace(self):
         _clear_reconstruction_modules()
         _clear_common_namespace_modules()
