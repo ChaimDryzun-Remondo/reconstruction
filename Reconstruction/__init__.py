@@ -4,6 +4,10 @@ Reconstruction — Modular deconvolution algorithms for satellite imagery.
 The package exposes a flat public API at the package root while keeping module
 imports lazy, so ``import Reconstruction`` succeeds even when optional
 dependencies are not installed.
+
+Note: the PascalCase package name ``Reconstruction`` is deliberate and is
+not to be renamed.  See ``RemondoPythonCore/docs/refactoring-audit/WORKPLAN.md``
+§"§8 decisions recorded" Q4 for the recorded decision.
 """
 from __future__ import annotations
 
