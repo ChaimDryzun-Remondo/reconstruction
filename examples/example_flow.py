@@ -2,7 +2,6 @@ import time
 from datetime import datetime
 from pathlib import Path
 import logging
-from typing import Optional, Callable
 
 import csv
 
@@ -11,7 +10,6 @@ import tifffile
 
 import matplotlib.pyplot as plt
 from scipy.signal import fftconvolve
-from scipy.optimize import minimize_scalar
 
 from RemondoPythonCore.Common.Image_Preprocessing import to_grayscale, image_normalization
 from RemondoPythonCore.Common.PSF_Preprocessing import condition_psf, psf_preprocess
@@ -26,6 +24,7 @@ from RemondoPythonCore.reconstruction import (
     TVAL3Deconv,
     FISTADeconv,
     ChambollePockDeconv,
+    optimize_alpha,
 )
 from RemondoPythonCore.reconstruction import PnPADMM, REDDeconv
 
@@ -53,159 +52,16 @@ def image_quality_metrics(reconstructed, reference):
     msgmsd = MSGMSD(reconstructed, reference)
     return psnr, msssim, fsim, vif, msgmsd
 
-def _resolve_metrics(
-    ssim_fn: Optional[Callable],
-    psnr_fn: Optional[Callable],
-) -> tuple[Callable, Callable]:
-    """Import default metric functions if not provided."""
-    if ssim_fn is None:
-        from RemondoPythonCore.Common.Image_Quality_Measures import MSSSIM
-        ssim_fn = MSSSIM
-    if psnr_fn is None:
-        from RemondoPythonCore.Common.Image_Quality_Measures import PiqPSNR
-        psnr_fn = PiqPSNR
-    return ssim_fn, psnr_fn
+# Sprint 4 commit T3.1 promoted optimize_wiener_alpha and its three
+# private helpers (_resolve_metrics, _coarse_search, _brent_refine) into
+# Reconstruction.wiener as the public optimize_alpha function returning
+# an OptimizeAlphaResult dataclass.  The local definitions previously at
+# this position have been removed; callers below now use the promoted
+# API (with attribute access on the dataclass instead of dict subscripting).
+# Behavioral equivalence under this import update was verified bit-exact
+# on the search trajectory and within FFT-noise floor (~1e-6) on the
+# final-evaluation metric values.
 
-def _coarse_search(
-    solver,
-    ref_image: np.ndarray,
-    ssim_fn: Callable,
-    t_center: float,
-    half_width: float,
-    n_points: int,
-    verbose: bool,
-) -> tuple[np.ndarray, np.ndarray, int]:
-    t_grid = np.linspace(t_center - half_width, t_center + half_width, n_points)
-    ssim_grid = np.empty(n_points)
-
-    for i, t in enumerate(t_grid):
-        result = solver.deblur(alpha=10.0 ** t)
-        ssim_grid[i] = float(ssim_fn(normalize_image(result), ref_image))
-
-    i_best = int(np.argmax(ssim_grid))
-
-    if verbose:
-        print(
-            f"  Coarse search ({n_points} pts): "
-            f"best t = {t_grid[i_best]:.4f} "
-            f"(α = {10.0 ** t_grid[i_best]:.4e}), "
-            f"MS-SSIM = {ssim_grid[i_best]:.6f}"
-        )
-
-    return t_grid, ssim_grid, i_best
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Stage 2: Local Brent refinement
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _brent_refine(
-    solver,
-    ref_image: np.ndarray,
-    ssim_fn: Callable,
-    t_lo: float,
-    t_hi: float,
-    xtol: float,
-    verbose: bool,
-) -> tuple[float, float, int]:
-    n_evals = 0
-
-    def objective(t: float) -> float:
-        nonlocal n_evals
-        result = solver.deblur(alpha=10.0 ** t)
-        ssim_val = float(ssim_fn(normalize_image(result), ref_image))
-        n_evals += 1
-        return -ssim_val
-
-    opt = minimize_scalar(
-        objective,
-        bounds=(t_lo, t_hi),
-        method="bounded",
-        options={"xatol": xtol, "maxiter": 50},
-    )
-
-    t_opt = opt.x
-    ssim_opt = -opt.fun
-
-    if verbose:
-        print(
-            f"  Brent refine ({n_evals} evals): "
-            f"t = {t_opt:.6f} "
-            f"(α = {10.0 ** t_opt:.6e}), "
-            f"MS-SSIM = {ssim_opt:.6f}"
-        )
-
-    return t_opt, ssim_opt, n_evals
-
-def optimize_wiener_alpha(
-    solver,
-    ref_image: np.ndarray,
-    alpha_0: float,
-    ssim_fn: Optional[Callable] = None,
-    psnr_fn: Optional[Callable] = None,
-    coarse_half_width: float = 3.0,
-    coarse_n_points: int = 80,
-    brent_xtol: float = 1e-3,
-    verbose: bool = True,
-) -> dict:
-    ssim_fn, psnr_fn = _resolve_metrics(ssim_fn, psnr_fn)
-    t0_wall = time.perf_counter()
-    t_center = np.log10(alpha_0)
-
-    if verbose:
-        print(f"Wiener α optimisation (two-stage)")
-        print(f"  α₀ = {alpha_0:.4e}  (t₀ = {t_center:.4f})")
-        print(f"  Coarse: {coarse_n_points} pts in "
-              f"[{10.0 ** (t_center - coarse_half_width):.2e}, "
-              f"{10.0 ** (t_center + coarse_half_width):.2e}]")
-
-    # ── Stage 1: coarse grid ──────────────────────────────────────────────
-    t_grid, ssim_grid, i_best = _coarse_search(
-        solver, ref_image, ssim_fn,
-        t_center, coarse_half_width, coarse_n_points, verbose,
-    )
-
-    # ── Stage 2: Brent refinement in the winning grid cell ────────────────
-    dt = t_grid[1] - t_grid[0]  # grid spacing
-    t_lo = t_grid[i_best] - dt
-    t_hi = t_grid[i_best] + dt
-
-    t_opt, ssim_opt, refine_evals = _brent_refine(
-        solver, ref_image, ssim_fn,
-        t_lo, t_hi, brent_xtol, verbose,
-    )
-
-    # ── Final evaluation at the optimum ───────────────────────────────────
-    best_alpha = 10.0 ** t_opt
-    best_result = normalize_image(solver.deblur(alpha=best_alpha))
-    best_ssim = float(ssim_fn(best_result, ref_image))
-    best_psnr = float(psnr_fn(best_result, ref_image))
-
-    elapsed = time.perf_counter() - t0_wall
-    total_evals = coarse_n_points + refine_evals + 1
-
-    if verbose:
-        print(f"\n{'═' * 60}")
-        print(f"  Optimal α  = {best_alpha:.6e}  (log₁₀ = {t_opt:.4f})")
-        print(f"  MS-SSIM    = {best_ssim:.6f}")
-        print(f"  PSNR       = {best_psnr:.2f} dB")
-        print(f"  Evals      : {coarse_n_points} coarse "
-              f"+ {refine_evals} refine + 1 final = {total_evals}")
-        print(f"  Wall time  : {elapsed:.2f} s")
-        print(f"{'═' * 60}")
-
-    return {
-        "alpha": best_alpha,
-        "log10_alpha": t_opt,
-        "ssim": best_ssim,
-        "psnr": best_psnr,
-        "image": best_result,
-        "coarse_t": t_grid,
-        "coarse_ssim": ssim_grid,
-        "coarse_n_evals": coarse_n_points,
-        "refine_n_evals": refine_evals,
-        "total_n_evals": total_evals,
-        "elapsed": elapsed,
-    }
 
 if __name__ == "__main__":
     input_image_path = r"C:\Users\chaim\Downloads\city_30cm_ROI2.tif"
@@ -280,9 +136,9 @@ if __name__ == "__main__":
     elapsed = time.perf_counter() - t0
     alpha_0 = solver.last_alpha
     print(f"Initial α from Wiener formula = {alpha_0:.4e}")
-    opt = optimize_wiener_alpha(solver, ref_image, alpha_0=alpha_0)
-    print(f"Optimal α = {opt['alpha']:.6e}, SSIM = {opt['ssim']:.6f}")
-    result = opt["image"]
+    opt = optimize_alpha(solver, ref_image, alpha_0=alpha_0, verbose=True)
+    print(f"Optimal α = {opt.alpha:.6e}, SSIM = {opt.ssim:.6f}")
+    result = opt.image
     print(f"Wiener Deconvolution (Classical) completed in {elapsed:.2f} seconds.")
     result = normalize_image(result)  # ensure result is in [0, 1] range
     wiener_classical_psnr, wiener_classical_msssim, wiener_classical_fsim, wiener_classical_vif, wiener_classical_msgmsd = image_quality_metrics(result, ref_image)
@@ -299,9 +155,9 @@ if __name__ == "__main__":
     print(f"Wiener Deconvolution (Tikhonov) completed in {elapsed:.2f} seconds.")
     alpha_0 = solver.last_alpha
     print(f"Initial α from Wiener formula = {alpha_0:.4e}")
-    opt = optimize_wiener_alpha(solver, ref_image, alpha_0=alpha_0)
-    print(f"Optimal α = {opt['alpha']:.6e}, SSIM = {opt['ssim']:.6f}")
-    result = opt["image"]
+    opt = optimize_alpha(solver, ref_image, alpha_0=alpha_0, verbose=True)
+    print(f"Optimal α = {opt.alpha:.6e}, SSIM = {opt.ssim:.6f}")
+    result = opt.image
     result = normalize_image(result)  # ensure result is in [0, 1] range
     wiener_tikhonov_psnr, wiener_tikhonov_msssim, wiener_tikhonov_fsim, wiener_tikhonov_vif, wiener_tikhonov_msgmsd = image_quality_metrics(result, ref_image)
     print(f"Wiener Deconvolution (Tikhonov) Quality:\n  PSNR: {wiener_tikhonov_psnr:.2f} dB\n  MS-SSIM: {wiener_tikhonov_msssim:.4f}, FSIM: {wiener_tikhonov_fsim:.4f}, VIF: {wiener_tikhonov_vif:.4f}, MSGMSD: {wiener_tikhonov_msgmsd:.6f}")

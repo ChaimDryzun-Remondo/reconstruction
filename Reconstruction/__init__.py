@@ -23,6 +23,8 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "set_backend": ("._backend", "set_backend"),
     "WienerDeconv": (".wiener", "WienerDeconv"),
     "wiener_deblur": (".wiener", "wiener_deblur"),
+    "optimize_alpha": (".wiener", "optimize_alpha"),
+    "OptimizeAlphaResult": (".wiener", "OptimizeAlphaResult"),
     "RLUnknownBoundary": (".rl_unknown_boundary", "RLUnknownBoundary"),
     "rl_deblur_unknown_boundary": (
         ".rl_unknown_boundary",
@@ -60,6 +62,8 @@ __all__ = [
     "FISTADeconv",
     "ChambollePockDeconv",
     "wiener_deblur",
+    "optimize_alpha",
+    "OptimizeAlphaResult",
     "rl_deblur_unknown_boundary",
     "landweber_deblur_unknown_boundary",
     "admm_deblur",

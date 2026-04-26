@@ -39,9 +39,12 @@ References
 from __future__ import annotations
 
 import logging
-from typing import Literal, Optional, Union
+import time
+from dataclasses import dataclass
+from typing import Callable, Literal, Optional, Union
 
 import numpy as np
+from scipy.optimize import minimize_scalar
 from scipy.signal import convolve2d as _cpu_convolve2d
 
 from . import _backend as backend
@@ -497,6 +500,300 @@ class WienerDeconv(DeconvBase):
         skipped in that case).
         """
         return self._sigma_est
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# optimize_alpha — two-stage α optimisation against a quality metric
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class OptimizeAlphaResult:
+    """Result of :func:`optimize_alpha`.
+
+    Attributes
+    ----------
+    alpha
+        Best α found.
+    log10_alpha
+        ``log10(alpha)`` at the optimum.
+    ssim
+        Quality metric (typically SSIM) at the optimum.
+    psnr
+        PSNR at the optimum (reported separately for diagnostics).
+    image
+        Deblurred image at the optimum, MINMAX-normalised to [0, 1].
+    coarse_t
+        ``log10(α)`` grid sampled in the coarse stage.
+    coarse_ssim
+        Metric values at the coarse-grid points.
+    coarse_n_evals
+        Number of solver calls in the coarse stage.
+    refine_n_evals
+        Number of solver calls in the Brent refinement stage.
+    total_n_evals
+        Total solver calls (coarse + refine + 1 final evaluation).
+    elapsed
+        Wall-clock seconds.
+    """
+
+    alpha: float
+    log10_alpha: float
+    ssim: float
+    psnr: float
+    image: np.ndarray
+    coarse_t: np.ndarray
+    coarse_ssim: np.ndarray
+    coarse_n_evals: int
+    refine_n_evals: int
+    total_n_evals: int
+    elapsed: float
+
+
+def _resolve_metrics(
+    ssim_fn: Optional[Callable], psnr_fn: Optional[Callable]
+) -> tuple[Callable, Callable]:
+    """Lazy-import default metric functions if not provided.
+
+    The lazy import preserves the package's "import succeeds even when
+    optional dependencies are not installed" pattern (see
+    ``Reconstruction/__init__.py``); ``MSSSIM`` / ``PiqPSNR`` pull in
+    the ``piq`` torch-backed library, which is not loaded at module
+    import time.
+    """
+    if ssim_fn is None:
+        from RemondoPythonCore.Common.Image_Quality_Measures import MSSSIM
+        ssim_fn = MSSSIM
+    if psnr_fn is None:
+        from RemondoPythonCore.Common.Image_Quality_Measures import PiqPSNR
+        psnr_fn = PiqPSNR
+    return ssim_fn, psnr_fn
+
+
+def _normalize_image_for_metric(image: np.ndarray) -> np.ndarray:
+    """MINMAX-rescale to [0, 1] with a degenerate-input safety floor.
+
+    Hardcoded preprocessing applied to each candidate deblurred image
+    before the quality metric is computed.  Matches the behaviour of
+    ``optimize_wiener_alpha`` in its pre-promotion form (where the
+    function lived in ``examples/example_flow.py`` and the helper was
+    named ``normalize_image``).  Callers needing raw-domain metrics
+    are not currently supported; see NOTES.md (Sprint 4 / commit T3.1)
+    for the future-extension framing.
+    """
+    img_min, img_max = image.min(), image.max()
+    if img_max - img_min > 1e-6:
+        return np.clip((image - img_min) / (img_max - img_min), 0.0, 1.0)
+    return np.zeros_like(image)
+
+
+def _coarse_search(
+    solver: "WienerDeconv",
+    ref_image: np.ndarray,
+    ssim_fn: Callable,
+    t_center: float,
+    half_width: float,
+    n_points: int,
+    verbose: bool,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Stage 1: uniform log10(α) grid evaluation.
+
+    Returns the grid, the metric values, and the index of the best.
+    """
+    t_grid = np.linspace(t_center - half_width, t_center + half_width, n_points)
+    ssim_grid = np.empty(n_points)
+
+    for i, t in enumerate(t_grid):
+        result = solver.deblur(alpha=10.0 ** t)
+        ssim_grid[i] = float(ssim_fn(_normalize_image_for_metric(result), ref_image))
+
+    i_best = int(np.argmax(ssim_grid))
+
+    if verbose:
+        print(
+            f"  Coarse search ({n_points} pts): "
+            f"best t = {t_grid[i_best]:.4f} "
+            f"(α = {10.0 ** t_grid[i_best]:.4e}), "
+            f"metric = {ssim_grid[i_best]:.6f}"
+        )
+
+    return t_grid, ssim_grid, i_best
+
+
+def _brent_refine(
+    solver: "WienerDeconv",
+    ref_image: np.ndarray,
+    ssim_fn: Callable,
+    t_lo: float,
+    t_hi: float,
+    xtol: float,
+    verbose: bool,
+) -> tuple[float, float, int]:
+    """Stage 2: bounded Brent refinement inside the winning grid cell."""
+    n_evals = 0
+
+    def objective(t: float) -> float:
+        nonlocal n_evals
+        result = solver.deblur(alpha=10.0 ** t)
+        ssim_val = float(ssim_fn(_normalize_image_for_metric(result), ref_image))
+        n_evals += 1
+        return -ssim_val
+
+    opt = minimize_scalar(
+        objective,
+        bounds=(t_lo, t_hi),
+        method="bounded",
+        options={"xatol": xtol, "maxiter": 50},
+    )
+
+    t_opt = float(opt.x)
+    ssim_opt = float(-opt.fun)
+
+    if verbose:
+        print(
+            f"  Brent refine ({n_evals} evals): "
+            f"t = {t_opt:.6f} "
+            f"(α = {10.0 ** t_opt:.6e}), "
+            f"metric = {ssim_opt:.6f}"
+        )
+
+    return t_opt, ssim_opt, n_evals
+
+
+def optimize_alpha(
+    solver: "WienerDeconv",
+    ref_image: np.ndarray,
+    alpha_0: float,
+    *,
+    ssim_fn: Optional[Callable] = None,
+    psnr_fn: Optional[Callable] = None,
+    coarse_half_width: float = 3.0,
+    coarse_n_points: int = 80,
+    brent_xtol: float = 1e-3,
+    verbose: bool = False,
+) -> OptimizeAlphaResult:
+    """Two-stage α optimisation against a quality metric.
+
+    Stage 1 sweeps a uniform ``log10(α)`` grid of width
+    ``2 * coarse_half_width`` centred on ``log10(alpha_0)``.  Stage 2
+    runs a bounded Brent refinement inside the winning grid cell.
+    Both stages call :meth:`WienerDeconv.deblur` repeatedly; the
+    constructor's frequency-domain pre-computation is amortised.
+
+    Each candidate deblurred image is MINMAX-rescaled to [0, 1] via
+    ``_normalize_image_for_metric`` before being passed to ``ssim_fn``
+    or ``psnr_fn``.  This preprocessing is hardcoded; callers needing
+    raw-domain metrics should request the parameterisation as a
+    follow-up (see NOTES.md).
+
+    Parameters
+    ----------
+    solver
+        Pre-constructed :class:`WienerDeconv` instance.  The constructor
+        performs the FFT pre-computation; this function only varies
+        ``alpha`` across calls to :meth:`WienerDeconv.deblur`.
+    ref_image
+        Reference (ground-truth) image used by the quality metric.
+        Not mutated.
+    alpha_0
+        Initial guess for α.  The coarse grid is centred on
+        ``log10(alpha_0)``.  A typical starting point is
+        ``solver.last_alpha`` after a default-α call.
+    ssim_fn
+        Quality metric to maximise.  Signature ``f(estimate, ref) -> float``.
+        If ``None``, defaults to ``Common.Image_Quality_Measures.MSSSIM``
+        (lazy-imported).  Despite the name, any compatible quality
+        metric may be passed (e.g. PSNR for an analytic-optimum test).
+    psnr_fn
+        PSNR-style metric reported in the result for diagnostics; not
+        used in optimisation.  Defaults to
+        ``Common.Image_Quality_Measures.PiqPSNR`` (lazy-imported).
+    coarse_half_width
+        Half-width of the coarse log10(α) grid.  Default 3.0 (search
+        spans ``[α_0 / 1e3, α_0 * 1e3]``).
+    coarse_n_points
+        Number of coarse-grid points.  Default 80.
+    brent_xtol
+        ``xatol`` tolerance for ``scipy.optimize.minimize_scalar`` in the
+        refinement stage.  Default 1e-3.
+    verbose
+        If ``True``, print per-stage progress.  Default ``False`` (silent).
+
+    Returns
+    -------
+    OptimizeAlphaResult
+        Frozen dataclass with the optimum α, its log10, the metric values,
+        the deblurred image at the optimum, the search history, and
+        diagnostics.
+
+    Notes
+    -----
+    The function is currently tied to the ``alpha=`` keyword of
+    :meth:`WienerDeconv.deblur`.  Generalising to other ``DeconvBase``
+    subclasses (RL, FISTA, Landweber, etc.) would require either a
+    callable wrapper or a parameter-name keyword; deferred until a
+    concrete caller needs it.
+    """
+    ssim_fn, psnr_fn = _resolve_metrics(ssim_fn, psnr_fn)
+    t0_wall = time.perf_counter()
+    t_center = float(np.log10(alpha_0))
+
+    if verbose:
+        print(f"Wiener α optimisation (two-stage)")
+        print(f"  α₀ = {alpha_0:.4e}  (t₀ = {t_center:.4f})")
+        print(
+            f"  Coarse: {coarse_n_points} pts in "
+            f"[{10.0 ** (t_center - coarse_half_width):.2e}, "
+            f"{10.0 ** (t_center + coarse_half_width):.2e}]"
+        )
+
+    t_grid, ssim_grid, i_best = _coarse_search(
+        solver, ref_image, ssim_fn,
+        t_center, coarse_half_width, coarse_n_points, verbose,
+    )
+
+    dt = float(t_grid[1] - t_grid[0])
+    t_lo = float(t_grid[i_best]) - dt
+    t_hi = float(t_grid[i_best]) + dt
+
+    t_opt, ssim_opt, refine_evals = _brent_refine(
+        solver, ref_image, ssim_fn,
+        t_lo, t_hi, brent_xtol, verbose,
+    )
+
+    best_alpha = 10.0 ** t_opt
+    best_image = _normalize_image_for_metric(solver.deblur(alpha=best_alpha))
+    best_ssim = float(ssim_fn(best_image, ref_image))
+    best_psnr = float(psnr_fn(best_image, ref_image))
+
+    elapsed = time.perf_counter() - t0_wall
+    total_evals = coarse_n_points + refine_evals + 1
+
+    if verbose:
+        print(f"\n{'═' * 60}")
+        print(f"  Optimal α  = {best_alpha:.6e}  (log₁₀ = {t_opt:.4f})")
+        print(f"  Metric     = {best_ssim:.6f}")
+        print(f"  PSNR       = {best_psnr:.2f} dB")
+        print(
+            f"  Evals      : {coarse_n_points} coarse "
+            f"+ {refine_evals} refine + 1 final = {total_evals}"
+        )
+        print(f"  Wall time  : {elapsed:.2f} s")
+        print(f"{'═' * 60}")
+
+    return OptimizeAlphaResult(
+        alpha=best_alpha,
+        log10_alpha=t_opt,
+        ssim=best_ssim,
+        psnr=best_psnr,
+        image=best_image,
+        coarse_t=t_grid,
+        coarse_ssim=ssim_grid,
+        coarse_n_evals=coarse_n_points,
+        refine_n_evals=refine_evals,
+        total_n_evals=total_evals,
+        elapsed=elapsed,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
