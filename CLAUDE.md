@@ -111,16 +111,23 @@ The four tests were rewritten (not deleted) to assert real properties
 of the current package layout.  See `tests/test_import_smoke.py` and
 `docs/README.md` (*Import entry point* section) for the record.
 
-Baseline (core-profile cold checkout on `audit-2025-q2`, Post-Sprint-0):
-**535 passed, 3 xfailed, 3 skipped, 24 deselected of 563 total tests, in ~11 s**.
+Baseline (core-profile cold checkout on `audit-2025-q2`, Post-Sprint-4):
+**549 passed, 4 xfailed, 3 skipped, 27 deselected of 581 total tests, in ~17 s**.
 
 The default invocation filters to the `core` profile via `pyproject.toml:38`'s
-`-m 'not imaging and not pnp and not monorepo'` addopts.  The 24 deselected
+`-m 'not imaging and not pnp and not monorepo'` addopts.  The 27 deselected
 tests are split across three optional profiles: `imaging` (20 tests — needs
 `scikit-image` + `matplotlib`), `pnp` (4 tests — needs `bm3d`), and `monorepo`
-(marker defined for tests requiring the full `RemondoPythonCore.Common`
-environment; currently 0 tests carry it).  See `pyproject.toml:38–44` for the
-marker declarations and `docs/README.md:347–362` for the alternate invocations.
+(3 tests — require the full `RemondoPythonCore.Common` environment, added in
+Sprint 4 thread 3).  See `pyproject.toml:38–44` for the marker declarations
+and `docs/README.md:347–362` for the alternate invocations.
+
+Monorepo-profile baseline (run with `-m monorepo` from the parent monorepo
+environment): **3 passed, 2 skipped, 578 deselected, in ~3 s**.  The three
+passing tests are `test_optimize_alpha::test_optimize_alpha_default_metric_runs_to_completion`
+(Sprint 4 T3.1), `test_example_flow_smoke::test_example_flow_module_loads_cleanly`
+(Sprint 4 T3.2), and `test_example_smoke::test_example_module_loads_cleanly`
+(Sprint 4 T3.3).
 
 History:
 - An earlier statement in this file claimed "656 passed, 0 failed"; that
@@ -136,8 +143,62 @@ History:
   failures into passes by making `monkeypatch.setattr` non-raising.
 - Sprint 0 commit W6 (submodule `ab354c7`) converted the 3 `Shared.Common`
   failures to xfailed pending Sprint 5 Q2 removal.
-- Sprint 0 commit W7a (this commit; submodule SHA to be recorded in the
-  parent-repo commit message) updates this baseline line to the
-  Post-Sprint-0 state and aligns its wording to the canonical format used
+- Sprint 0 commit W7a (submodule `e43f9c0`, parent commit recorded in the
+  parent-repo `CLAUDE.md`) updated this baseline line to the
+  Post-Sprint-0 state and aligned its wording to the canonical format used
   in the repo-root `CLAUDE.md` §"Running the test suites" section and the
   `NOTES.md` §"Consolidated baseline for gate comparison" table.
+- Sprint 1 (three submodule commits): `a021d17` deleted the unused
+  `external_reconstruction/OptimizeTemp.py` scratch script (audit M-finding
+  closed; pre-destruction grep confirmed zero importers); `f7e4d46` added
+  a four-line note to `Reconstruction/__init__.py`'s module docstring
+  recording §8 Q4 (the PascalCase `Reconstruction/` name is deliberate
+  and not to be renamed); `05fb923` relocated `example.py` and
+  `example_flow.py` from the package root to a new `examples/`
+  subdirectory (Sprint 1 commits C7 + C9 bundled), with `example_flow.py`
+  receiving an `if __name__ == "__main__":` wrap to make its imperative
+  code safe to import.  The Sprint 1 work did not change the test gate;
+  Post-Sprint-1 = Post-Sprint-0 (535 passed, 3 xfailed, 3 skipped,
+  24 deselected of 563 total tests).
+- Sprint 4 thread 3 (three submodule commits) advanced the gate to its
+  Post-Sprint-4 state by adding 18 tests (16 from T3.1, 1 each from T3.2
+  and T3.3) and 3 monorepo-marked deselects (1 from T3.1, 1 each from
+  T3.2 and T3.3):
+  - `2106e7e` (T3.1) promoted `optimize_wiener_alpha` from
+    `examples/example_flow.py` into a public `optimize_alpha` function +
+    `OptimizeAlphaResult` frozen dataclass at `Reconstruction.wiener`,
+    co-locating four private helpers (`_resolve_metrics`, `_coarse_search`,
+    `_brent_refine`, `_normalize_image_for_metric`) in the same module
+    and exporting the two public symbols via `Reconstruction/__init__.py`'s
+    lazy `_EXPORTS`.  Behavioral comparison harness (run before commit;
+    not committed) confirmed bit-exact agreement on the search trajectory
+    and within-FFT-noise-floor (~1e-6) on final-evaluation values.  Added
+    16 tests at `tests/test_optimize_alpha.py` (5 convergence,
+    5 robustness including 1 NaN-metric flexible xfail, 3 contract,
+    2 search-parameter dispatch, 1 metric-substitution sanity); 14 in
+    the core profile, 1 xfailed, 1 monorepo-deselected.  Updated
+    `examples/example_flow.py` to import the promoted API.
+  - `717ffc2` (T3.2) rewrote `examples/example_flow.py`'s `__main__`
+    block to use synthetic input (replacing the hardcoded user paths
+    flagged as the C9 finding), consolidated the eleven copy-paste
+    algorithm blocks into a declarative `_AlgoSpec` dataclass + executor
+    function, fixed the deprecated `RemondoPythonCore.reconstruction`
+    import path, gated PnP-ADMM and RED-ADMM on `bm3d` availability,
+    dropped per-algorithm TIFF saves and per-algorithm `plt.show()`
+    calls in favour of a single end-of-demo tiled figure plus an
+    α-trajectory subplot.  Added one Level-1 module-load smoke test at
+    `tests/test_example_flow_smoke.py`, marked `@pytest.mark.monorepo`.
+  - `b6d976e` (T3.3) rewrote `examples/example.py` per three divergence
+    dispositions: kept local `blur_image` (honouring T1.2's deferred
+    M1 consolidation), kept local `add_awgn` (pedagogical clarity),
+    replaced local `psnr`/`ssim` with `Common.PSNR`/`Common.SSIM`
+    (six call sites; argument order swapped from `(reference, estimate)`
+    to `(image, ref_image)`).  Extracted the smoke-test sys.modules /
+    sys.path bootstrap into a shared helper at
+    `tests/_remondopythoncore_bootstrap.py` and refactored T3.2's
+    smoke test to use it; added one new Level-1 module-load smoke
+    test at `tests/test_example_smoke.py`.
+- Submodule batch closeout commit (this commit; submodule SHA to be
+  recorded in the parent-repo commit message) updates this baseline line
+  to the Post-Sprint-4 state and appends the Sprint 1 and Sprint 4 entries
+  above.  No code changes; documentation alignment only.
