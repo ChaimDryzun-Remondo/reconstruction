@@ -38,6 +38,14 @@ from scipy.signal import fftconvolve
 
 from RemondoPythonCore.Common.Image_Preprocessing import to_grayscale, image_normalization
 from RemondoPythonCore.Common.General_Utilities import odd_crop_around_center
+# Sprint 4 commit T3.3 replaced the local Wang-2004 simplified ``psnr`` /
+# ``ssim`` implementations with Common's wrappers around skimage.metrics.
+# Note that the Common API takes ``(image, ref_image)`` -- reverse of the
+# local ``(reference, estimate)`` order -- and that Common's SSIM uses
+# the standard Gaussian-windowed implementation (vs the local
+# full-image simplified Wang-2004), which is an accuracy upgrade and
+# produces slightly different absolute SSIM values from pre-T3.3 runs.
+from RemondoPythonCore.Common.Image_Quality_Measures import PSNR, SSIM
 
 from RemondoPythonCore.external_reconstruction import (
     WienerDeconv,
@@ -142,36 +150,9 @@ def add_awgn(image: np.ndarray, sigma: float, seed: int = 42) -> np.ndarray:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Quality Metrics
+# Quality metrics imported from Common (see top-of-file note for context).
+# Local ``psnr`` / ``ssim`` were removed by Sprint 4 commit T3.3.
 # ══════════════════════════════════════════════════════════════════════════════
-
-def psnr(reference: np.ndarray, estimate: np.ndarray,
-         data_range: float = 1.0) -> float:
-    """Peak Signal-to-Noise Ratio (dB)."""
-    mse = np.mean((reference - estimate) ** 2)
-    if mse < 1e-15:
-        return float("inf")
-    return 10.0 * np.log10(data_range ** 2 / mse)
-
-
-def ssim(reference: np.ndarray, estimate: np.ndarray,
-         data_range: float = 1.0) -> float:
-    """
-    Structural Similarity Index (simplified, full-image).
-
-    Uses the classic Wang et al. (2004) formulation with default constants
-    C1 = (K1 * L)^2,  C2 = (K2 * L)^2,  K1=0.01, K2=0.03, L=data_range.
-    """
-    C1 = (0.01 * data_range) ** 2
-    C2 = (0.03 * data_range) ** 2
-    mu_x = reference.mean()
-    mu_y = estimate.mean()
-    sig_x = reference.var()
-    sig_y = estimate.var()
-    sig_xy = np.mean((reference - mu_x) * (estimate - mu_y))
-    num = (2 * mu_x * mu_y + C1) * (2 * sig_xy + C2)
-    den = (mu_x ** 2 + mu_y ** 2 + C1) * (sig_x + sig_y + C2)
-    return float(num / den)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -374,8 +355,8 @@ def display_results(ground_truth: np.ndarray,
     axes[0].axis("off")
 
     # Degraded
-    psnr_deg = psnr(ground_truth, degraded)
-    ssim_deg = ssim(ground_truth, degraded)
+    psnr_deg = PSNR(degraded, ground_truth)
+    ssim_deg = SSIM(degraded, ground_truth)
     axes[1].imshow(degraded, cmap="gray", vmin=0, vmax=1)
     axes[1].set_title(f"Degraded\nPSNR={psnr_deg:.2f} dB  SSIM={ssim_deg:.3f}",
                       fontsize=10)
@@ -434,7 +415,7 @@ def main() -> None:
     blurred = blur_image(gray, PSF)
     degraded = add_awgn(blurred, sigma=CFG.noise_sigma, seed=CFG.noise_seed)
     logger.info("Degraded image PSNR=%.2f dB, SSIM=%.3f",
-                psnr(gray, degraded), ssim(gray, degraded))
+                PSNR(degraded, gray), SSIM(degraded, gray))
 
     # ── 4. Run all algorithms ───────────────────────────────────────────────
     runners = [
@@ -458,8 +439,8 @@ def main() -> None:
             if r is None:
                 continue
             # Compute quality metrics against the ground truth
-            r.psnr_db = psnr(gray, r.image)
-            r.ssim_val = ssim(gray, r.image)
+            r.psnr_db = PSNR(r.image, gray)
+            r.ssim_val = SSIM(r.image, gray)
             results.append(r)
             logger.info("  %-20s  PSNR=%6.2f dB  SSIM=%.4f  (%.2f s)",
                         r.name, r.psnr_db, r.ssim_val, r.elapsed_s)
@@ -470,8 +451,8 @@ def main() -> None:
     print("\n" + "=" * 70)
     print(f"{'Algorithm':<24s}  {'PSNR (dB)':>10s}  {'SSIM':>8s}  {'Time (s)':>9s}")
     print("-" * 70)
-    psnr_deg = psnr(gray, degraded)
-    ssim_deg = ssim(gray, degraded)
+    psnr_deg = PSNR(degraded, gray)
+    ssim_deg = SSIM(degraded, gray)
     print(f"{'(Degraded input)':<24s}  {psnr_deg:10.2f}  {ssim_deg:8.4f}  {'—':>9s}")
     for r in results:
         print(f"{r.name:<24s}  {r.psnr_db:10.2f}  {r.ssim_val:8.4f}  {r.elapsed_s:9.2f}")

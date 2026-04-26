@@ -6,6 +6,12 @@ declarative algorithm spec list, and the corrected
 adds a single Level-1 smoke test that catches import-time and
 syntax-level regressions without running the demo's __main__ block.
 
+Sprint 4 commit T3.3 refactored this test to call the shared bootstrap
+helper at ``_remondopythoncore_bootstrap.py`` rather than inlining the
+sys.modules / sys.path cleanup logic.  T3.3's ``test_example_smoke.py``
+calls the same helper; two callers from the moment of introduction
+validate the helper's interface.
+
 The test does **not** verify pedagogical clarity, structural
 readability, or the correctness of the algorithm spec values — those
 properties are not testable automatically and require human review.
@@ -36,35 +42,13 @@ when the parent monorepo's pytest invocation is used.
 """
 from __future__ import annotations
 
-import importlib
 import importlib.util
 import sys
 from pathlib import Path
 
 import pytest
 
-# example_flow.py imports from ``RemondoPythonCore.Common.*`` and
-# ``RemondoPythonCore.external_reconstruction.*``.  Both namespaces
-# resolve when ``c:/git/`` (the parent of ``RemondoPythonCore/``) is on
-# ``sys.path``.  The parent monorepo's pyproject sets
-# ``pythonpath = [".."]`` for its own pytest invocations; the submodule's
-# pyproject does not, so when this test is collected via the submodule's
-# pytest we add the parent-of-RemondoPythonCore explicitly.
-#
-# Order matters: the submodule's conftest.py installs ``Shared.Common.*``
-# mocks (per Sprint 0 W6) which transitively cause ``RemondoPythonCore``
-# to be cached in ``sys.modules`` as a namespace package with an empty
-# ``__path__``.  We therefore (a) prepend the parent-of-RemondoPythonCore
-# to ``sys.path``, (b) drop any stale ``RemondoPythonCore.*`` entries
-# from ``sys.modules`` so the namespace package's ``__path__`` is rebuilt
-# on next import, and (c) invalidate finder caches.
-_REMONDOPYTHONCORE_PARENT = Path(__file__).resolve().parents[3]
-if str(_REMONDOPYTHONCORE_PARENT) not in sys.path:
-    sys.path.insert(0, str(_REMONDOPYTHONCORE_PARENT))
-for _stale in [k for k in list(sys.modules) if k == "RemondoPythonCore"
-               or k.startswith("RemondoPythonCore.")]:
-    del sys.modules[_stale]
-importlib.invalidate_caches()
+from ._remondopythoncore_bootstrap import bootstrap_remondopythoncore
 
 
 @pytest.mark.monorepo
@@ -74,13 +58,22 @@ def test_example_flow_module_loads_cleanly() -> None:
     names downstream tooling relies on, plus the expected algorithm
     spec count.
     """
+    bootstrap_remondopythoncore()
+
     path = Path(__file__).parent.parent / "examples" / "example_flow.py"
     assert path.exists(), f"example_flow.py not found at {path}"
 
     spec = importlib.util.spec_from_file_location("example_flow_smoke", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)  # __name__ != "__main__", main block skipped
+    # Register in sys.modules before exec_module: Python 3.13's dataclass
+    # decorator does sys.modules.get(cls.__module__).__dict__ during type
+    # resolution; an unregistered module yields None and crashes.
+    sys.modules["example_flow_smoke"] = module
+    try:
+        spec.loader.exec_module(module)  # __name__ != "__main__", main block skipped
+    finally:
+        sys.modules.pop("example_flow_smoke", None)
 
     assert hasattr(module, "image_quality_metrics"), (
         "image_quality_metrics helper missing"
