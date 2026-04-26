@@ -1,323 +1,427 @@
-import time
-from datetime import datetime
-from pathlib import Path
+"""End-to-end reconstruction demo with Wiener α-optimisation.
+
+Demonstrates all reconstruction algorithms in the package on a small
+synthetic problem (skimage's ``camera`` test image blurred by an Airy
+PSF and corrupted by additive white Gaussian noise).  The two Wiener
+variants additionally invoke ``Reconstruction.wiener.optimize_alpha`` to
+showcase the two-stage α-optimisation workflow that is the unique-to-
+this-demo feature compared to ``examples/example.py``.
+
+Synthetic input rather than real-image / real-PSF input: the demo's
+purpose is API illustration rather than a research workflow, and
+synthetic input lets the script run on any machine without external
+files.  See `docs/refactoring-audit/NOTES.md` Sprint 4 commits T3.1 /
+T3.2 for the design rationale.
+
+Usage:
+    python example_flow.py
+
+Requirements:
+    numpy, scipy, scikit-image, matplotlib, tifffile (optional —
+    only used by the package's IO layer if you adapt the demo to read
+    your own data).  The PnP-ADMM / RED-ADMM algorithms additionally
+    require ``bm3d``; if not installed, those two algorithms are
+    skipped with a printed message.
+"""
 import logging
-
-import csv
-
-import numpy as np
-import tifffile
+import time
+from dataclasses import dataclass, field
+from typing import Any
 
 import matplotlib.pyplot as plt
-from scipy.signal import fftconvolve
+import numpy as np
+import skimage as ski
+from scipy.special import j1
 
-from RemondoPythonCore.Common.Image_Preprocessing import to_grayscale, image_normalization
-from RemondoPythonCore.Common.PSF_Preprocessing import condition_psf, psf_preprocess
-from RemondoPythonCore.Common.IO import load_image
-from RemondoPythonCore.Common.General_Utilities import odd_crop
-from RemondoPythonCore.Common.Image_Quality_Measures import PiqPSNR, MSSSIM, FSIM, VIF, MSGMSD
-from RemondoPythonCore.reconstruction import (
-    WienerDeconv,
-    RLUnknownBoundary,
-    LandweberUnknownBoundary,
+from RemondoPythonCore.Common.Image_Preprocessing import (
+    image_normalization,
+    to_grayscale,
+)
+from RemondoPythonCore.Common.General_Utilities import odd_crop_around_center
+from RemondoPythonCore.Common.Image_Quality_Measures import (
+    FSIM,
+    MSGMSD,
+    MSSSIM,
+    PiqPSNR,
+    VIF,
+)
+from RemondoPythonCore.external_reconstruction import (
     ADMMDeconv,
-    TVAL3Deconv,
-    FISTADeconv,
     ChambollePockDeconv,
+    FISTADeconv,
+    LandweberUnknownBoundary,
+    RLUnknownBoundary,
+    TVAL3Deconv,
+    WienerDeconv,
     optimize_alpha,
 )
-from RemondoPythonCore.reconstruction import PnPADMM, REDDeconv
 
-def show_image(image, title=None):
-    plt.imshow(image, cmap="gray")
-    if title is not None:
-        plt.title(title)
-    plt.axis("off")
-    plt.show()
+try:
+    from RemondoPythonCore.external_reconstruction import PnPADMM, REDDeconv
+    _HAS_BM3D = True
+except ImportError:
+    _HAS_BM3D = False
 
-def normalize_image(image):
-    """Normalize image to [0, 1] range."""
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(name)-28s  %(levelname)-5s  %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def normalize_image(image: np.ndarray) -> np.ndarray:
+    """MINMAX-rescale an image to [0, 1] with a degenerate-input safety floor."""
     img_min, img_max = image.min(), image.max()
     if img_max - img_min > 1e-6:
         return np.clip((image - img_min) / (img_max - img_min), 0.0, 1.0)
-    else:
-        return np.zeros_like(image)
-
-def image_quality_metrics(reconstructed, reference):
-    """Compute PSNR and MS-SSIM between reconstructed and reference images."""
-    psnr = PiqPSNR(reconstructed, reference)
-    msssim = MSSSIM(reconstructed, reference)
-    fsim = FSIM(reconstructed, reference)
-    vif = VIF(reconstructed, reference)
-    msgmsd = MSGMSD(reconstructed, reference)
-    return psnr, msssim, fsim, vif, msgmsd
-
-# Sprint 4 commit T3.1 promoted optimize_wiener_alpha and its three
-# private helpers (_resolve_metrics, _coarse_search, _brent_refine) into
-# Reconstruction.wiener as the public optimize_alpha function returning
-# an OptimizeAlphaResult dataclass.  The local definitions previously at
-# this position have been removed; callers below now use the promoted
-# API (with attribute access on the dataclass instead of dict subscripting).
-# Behavioral equivalence under this import update was verified bit-exact
-# on the search trajectory and within FFT-noise floor (~1e-6) on the
-# final-evaluation metric values.
+    return np.zeros_like(image)
 
 
-if __name__ == "__main__":
-    input_image_path = r"C:\Users\chaim\Downloads\city_30cm_ROI2.tif"
-    input_psf_path = r"C:\Users\chaim\Datasets\PSFs\TMA_R1_150_50\detector_psf_tiffs\psf_det_inner_r_0350.000mm_step0005.tif"
-
-    output_parent_dir = Path(r"C:\Users\chaim\Results")
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = output_parent_dir / f"Reconstruction_{stamp}"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    noise_sigma: float = 0.01        # std-dev of AWGN (on [0,1] scale)
-    noise_seed: int = 42
-    rng = np.random.default_rng(noise_seed)
-
-    # Load and preprocess the input image to obtain the reference image
-    scene_raw, _, _ = load_image(filename=str(input_image_path), trnasform_to_grayscale=True, normlize_image=True)
-    ref_image = odd_crop(scene_raw)
-
-    ref_image = image_normalization(to_grayscale(ref_image))
-    ref_image = normalize_image(ref_image)
-
-    tifffile.imwrite(str(output_dir / f"reference.tif"), ref_image.astype(np.float32))
-    show_image(ref_image, title="Reference Image")
-
-    # Load and preprocess PSF, normalise to sum to 1, and save
-    psf_raw, _, _ = load_image(filename=str(input_psf_path))
-    psf_np = psf_preprocess(
-        psf=psf_raw,
-        center_method="com",
-        remove_negatives="clip",
-        eps=1e-12,
-        enforce_odd_shape=True,
-    )
-    psf_np = condition_psf(
-        psf=psf_np,
-        bg_ring_frac=0.15,
-        taper_outer_frac=0.90,
-        taper_end_frac=1.0,
+def image_quality_metrics(
+    reconstructed: np.ndarray, reference: np.ndarray
+) -> tuple[float, float, float, float, float]:
+    """Compute the five image-quality metrics reported by this demo."""
+    return (
+        PiqPSNR(reconstructed, reference),
+        MSSSIM(reconstructed, reference),
+        FSIM(reconstructed, reference),
+        VIF(reconstructed, reference),
+        MSGMSD(reconstructed, reference),
     )
 
-    psf_np /= (psf_np.sum() + 1e-12)  # normalise PSF to sum to 1
 
-    tifffile.imwrite(str(output_dir / f"PSF.tif"), psf_np.astype(np.float32))
-    show_image(psf_np, title="PSF")
+def airy_psf(size: tuple[int, int] = (35, 35), radius: float = 3.0) -> np.ndarray:
+    """Generate an Airy-disk PSF (jinc² pattern), normalised to sum=1.
 
-    results = []
+    Parameters
+    ----------
+    size
+        ``(height, width)`` of the output array.  Both dimensions must
+        be odd for a centred PSF.
+    radius
+        Distance in pixels from the centre to the first zero ring.
+        Related to the optical system by ``radius ≈ 1.22 λ f/# / pixel_pitch``.
+    """
+    h, w = size
+    cy, cx = h // 2, w // 2
+    y, x = np.ogrid[-cy : h - cy, -cx : w - cx]
+    r = np.sqrt(x ** 2 + y ** 2)
+    arg = np.pi * r / radius
+    with np.errstate(invalid="ignore", divide="ignore"):
+        psf = np.where(r == 0, 1.0, (2 * j1(arg) / arg) ** 2)
+    return psf / psf.sum()
 
-    # Create blurred image by convolving reference image with PSF (circular-boundary approx) and normalise to [0, 1]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Algorithm specification (declarative)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class _AlgoSpec:
+    """One algorithm's configuration for the eleven-algorithm sweep.
+
+    Variability between algorithms is captured here as data; the
+    executor function ``_run_one_algorithm`` runs any spec uniformly.
+    """
+    name: str
+    solver_class: type
+    solver_kwargs: dict[str, Any] = field(default_factory=dict)
+    deblur_kwargs: dict[str, Any] = field(default_factory=dict)
+    optimize_alpha_after: bool = False  # True for the two Wiener variants
+
+
+def _build_algo_specs() -> list[_AlgoSpec]:
+    """Build the algorithm spec list, conditionally including the two
+    BM3D-dependent algorithms based on ``_HAS_BM3D``."""
+    specs: list[_AlgoSpec] = [
+        _AlgoSpec(
+            "Wiener (Classical)", WienerDeconv,
+            {"mode": "Classical", "paddingMode": "Reflect", "padding_scale": 2.0},
+            {},
+            optimize_alpha_after=True,
+        ),
+        _AlgoSpec(
+            "Wiener (Tikhonov)", WienerDeconv,
+            {"mode": "Tikhonov", "paddingMode": "Reflect", "padding_scale": 2.0},
+            {},
+            optimize_alpha_after=True,
+        ),
+        _AlgoSpec(
+            "Richardson-Lucy", RLUnknownBoundary,
+            {"paddingMode": "Reflect", "padding_scale": 2.0},
+            {"num_iter": 500, "lambda_tv": 1e-3},
+        ),
+        _AlgoSpec(
+            "Landweber", LandweberUnknownBoundary,
+            {"paddingMode": "Reflect", "padding_scale": 2.0},
+            {"num_iter": 250, "lambda_tv": 1e-3, "precondition": True, "adaptive_restart": True},
+        ),
+        _AlgoSpec(
+            "ADMM (TV)", ADMMDeconv,
+            {"paddingMode": "Reflect", "padding_scale": 2.0},
+            {"num_iter": 1500, "lambda_tv": 8.9e-4, "TVnorm": 2},
+        ),
+        _AlgoSpec(
+            "TVAL3", TVAL3Deconv,
+            {"paddingMode": "Reflect", "padding_scale": 2.0},
+            {"num_iter": 1500, "lambda_tv": 6.0e-4, "TVnorm": 2,
+             "adaptive_tv": True, "burn_in_frac": 0.2},
+        ),
+        _AlgoSpec(
+            "FISTA (TV)", FISTADeconv,
+            {"paddingMode": "Reflect", "padding_scale": 2.0},
+            {"num_iter": 600, "lambda_reg": 6e-4, "reg_mode": "TV"},
+        ),
+        _AlgoSpec(
+            "FISTA (L1-Wavelet)", FISTADeconv,
+            {"wavelet": "bior4.4", "wavelet_levels": 4,
+             "paddingMode": "Reflect", "padding_scale": 2.0},
+            {"num_iter": 650, "lambda_reg": 8e-4, "reg_mode": "L1_wavelet"},
+        ),
+        _AlgoSpec(
+            "Chambolle-Pock", ChambollePockDeconv,
+            {"paddingMode": "Reflect", "padding_scale": 2.0},
+            {"num_iter": 110, "lambda_tv": 0.00015},
+        ),
+    ]
+    if _HAS_BM3D:
+        specs.append(
+            _AlgoSpec(
+                "PnP-ADMM (BM3D)", PnPADMM,
+                {"rho_z": 0.5, "sigma_scale": 0.1, "rho_v": 1.0,
+                 "paddingMode": "Reflect", "padding_scale": 2.0},
+                {"num_iter": 8, "lambda_tv": 0.002},
+            )
+        )
+        specs.append(
+            _AlgoSpec(
+                "RED-ADMM (BM3D)", REDDeconv,
+                {"sigma": 0.005, "rho_v": 0.5,
+                 "paddingMode": "Reflect", "padding_scale": 2.0},
+                {"num_iter": 3, "lambda_reg": 0.0001},
+            )
+        )
+    return specs
+
+
+_ALGO_SPECS: list[_AlgoSpec] = _build_algo_specs()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Algorithm executor
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _run_one_algorithm(
+    spec: _AlgoSpec,
+    *,
+    degraded: np.ndarray,
+    ref_image: np.ndarray,
+    psf: np.ndarray,
+) -> dict[str, Any]:
+    """Run one algorithm spec end-to-end and return its result + metrics.
+
+    Returns a dict with: ``name``, ``elapsed`` (s), ``image`` (final
+    deblurred image, MINMAX-rescaled to [0, 1]), ``psnr``, ``msssim``,
+    ``fsim``, ``vif``, ``msgmsd``, plus ``alpha_search`` (the
+    ``OptimizeAlphaResult`` from ``optimize_alpha`` for the Wiener
+    variants, ``None`` otherwise).
+    """
+    solver = spec.solver_class(degraded, psf, **spec.solver_kwargs)
     t0 = time.perf_counter()
-    blurred = fftconvolve(ref_image, psf_np, mode="same")
+    result = solver.deblur(**spec.deblur_kwargs)
+    alpha_search = None
+    if spec.optimize_alpha_after:
+        alpha_0 = solver.last_alpha
+        opt = optimize_alpha(solver, ref_image, alpha_0=alpha_0, verbose=False)
+        result = opt.image
+        alpha_search = opt
     elapsed = time.perf_counter() - t0
-    blurred_psnr, blurred_msssim, blurred_fsim, blurred_vif, blurred_msgmsd = image_quality_metrics(blurred, ref_image)
-    results.append(("Blurred", elapsed, blurred_psnr, blurred_msssim, blurred_fsim, blurred_vif, blurred_msgmsd))
-    print(f"Blurred Image Quality:\n  PSNR: {blurred_psnr:.2f} dB\n  MS-SSIM: {blurred_msssim:.4f}, FSIM: {blurred_fsim:.4f}, VIF: {blurred_vif:.4f}, MSGMSD: {blurred_msgmsd:.6f}")
-    tifffile.imwrite(str(output_dir / f"degraded.tif"), blurred.astype(np.float32))
-    show_image(blurred, title="Degraded Image")	
+    result = normalize_image(result)
+    psnr, msssim, fsim, vif, msgmsd = image_quality_metrics(result, ref_image)
+    return {
+        "name": spec.name,
+        "elapsed": elapsed,
+        "image": result,
+        "psnr": psnr,
+        "msssim": msssim,
+        "fsim": fsim,
+        "vif": vif,
+        "msgmsd": msgmsd,
+        "alpha_search": alpha_search,
+    }
 
-    # Add AWGN to the blurred image
-    t0 = time.perf_counter()
-    degraded = blurred + rng.normal(0.0, noise_sigma, blurred.shape)
-    elapsed = time.perf_counter() - t0
-    degraded_psnr, degraded_msssim, degraded_fsim, degraded_vif, degraded_msgmsd = image_quality_metrics(degraded, ref_image)
-    results.append(("Degraded", elapsed, degraded_psnr, degraded_msssim, degraded_fsim, degraded_vif, degraded_msgmsd))
-    print(f"Degraded Image Quality:\n  PSNR: {degraded_psnr:.2f} dB\n  MS-SSIM: {degraded_msssim:.4f}, FSIM: {degraded_fsim:.4f}, VIF: {degraded_vif:.4f}, MSGMSD: {degraded_msgmsd:.6f}")
-    tifffile.imwrite(str(output_dir / f"degraded_noisy.tif"), degraded.astype(np.float32))
-    show_image(degraded, title="Degraded Image with AWGN")
 
-    # Wiener deconvolution  (Classical, no regularization)
-    solver = WienerDeconv(degraded, psf_np, mode="Classical", paddingMode="Reflect", padding_scale=2.0)
-    t0 = time.perf_counter()
-    result = solver.deblur()
-    elapsed = time.perf_counter() - t0
-    alpha_0 = solver.last_alpha
-    print(f"Initial α from Wiener formula = {alpha_0:.4e}")
-    opt = optimize_alpha(solver, ref_image, alpha_0=alpha_0, verbose=True)
-    print(f"Optimal α = {opt.alpha:.6e}, SSIM = {opt.ssim:.6f}")
-    result = opt.image
-    print(f"Wiener Deconvolution (Classical) completed in {elapsed:.2f} seconds.")
-    result = normalize_image(result)  # ensure result is in [0, 1] range
-    wiener_classical_psnr, wiener_classical_msssim, wiener_classical_fsim, wiener_classical_vif, wiener_classical_msgmsd = image_quality_metrics(result, ref_image)
-    print(f"Wiener Deconvolution (Classical) Quality:\n  PSNR: {wiener_classical_psnr:.2f} dB\n  MS-SSIM: {wiener_classical_msssim:.4f}, FSIM: {wiener_classical_fsim:.4f}, VIF: {wiener_classical_vif:.4f}, MSGMSD: {wiener_classical_msgmsd:.6f}")
-    results.append(("Wiener (Classical)", elapsed, wiener_classical_psnr, wiener_classical_msssim, wiener_classical_fsim, wiener_classical_vif, wiener_classical_msgmsd))
-    tifffile.imwrite(str(output_dir / f"wiener_classical.tif"), result.astype(np.float32))
-    show_image(result, title=f"Wiener Deconvolution (Classical)\nElapsed time: {elapsed:.2f} seconds")
+# ══════════════════════════════════════════════════════════════════════════════
+# Visualisation
+# ══════════════════════════════════════════════════════════════════════════════
 
-    # Wiener deconvolution (Tikhonov regularization)
-    solver = WienerDeconv(degraded, psf_np, mode="Tikhonov", paddingMode="Reflect", padding_scale=2.0)
-    t0 = time.perf_counter()
-    result = solver.deblur()
-    elapsed = time.perf_counter() - t0
-    print(f"Wiener Deconvolution (Tikhonov) completed in {elapsed:.2f} seconds.")
-    alpha_0 = solver.last_alpha
-    print(f"Initial α from Wiener formula = {alpha_0:.4e}")
-    opt = optimize_alpha(solver, ref_image, alpha_0=alpha_0, verbose=True)
-    print(f"Optimal α = {opt.alpha:.6e}, SSIM = {opt.ssim:.6f}")
-    result = opt.image
-    result = normalize_image(result)  # ensure result is in [0, 1] range
-    wiener_tikhonov_psnr, wiener_tikhonov_msssim, wiener_tikhonov_fsim, wiener_tikhonov_vif, wiener_tikhonov_msgmsd = image_quality_metrics(result, ref_image)
-    print(f"Wiener Deconvolution (Tikhonov) Quality:\n  PSNR: {wiener_tikhonov_psnr:.2f} dB\n  MS-SSIM: {wiener_tikhonov_msssim:.4f}, FSIM: {wiener_tikhonov_fsim:.4f}, VIF: {wiener_tikhonov_vif:.4f}, MSGMSD: {wiener_tikhonov_msgmsd:.6f}")
-    results.append(("Wiener (Tikhonov)", elapsed, wiener_tikhonov_psnr, wiener_tikhonov_msssim, wiener_tikhonov_fsim, wiener_tikhonov_vif, wiener_tikhonov_msgmsd))
-    tifffile.imwrite(str(output_dir / f"wiener_tikhonov.tif"), result.astype(np.float32))
-    show_image(result, title=f"Wiener Deconvolution (Tikhonov)\nElapsed time: {elapsed:.2f} seconds")
 
-    # Richardson-Lucy deconvolution with unknown boundary conditions
-    solver = RLUnknownBoundary(degraded, psf_np, paddingMode="Reflect", padding_scale=2.0)
-    t0 = time.perf_counter()
-    result = solver.deblur(num_iter=500, lambda_tv=1e-3)
-    elapsed = time.perf_counter() - t0
-    print(f"Richardson-Lucy Deconvolution completed in {elapsed:.2f} seconds.")
-    result = normalize_image(result)  # ensure result is in [0, 1] range
-    rl_psnr, rl_msssim, rl_fsim, rl_vif, rl_msgmsd = image_quality_metrics(result, ref_image)
-    print(f"Richardson-Lucy Deconvolution Quality:\n  PSNR: {rl_psnr:.2f} dB\n  MS-SSIM: {rl_msssim:.4f}, FSIM: {rl_fsim:.4f}, VIF: {rl_vif:.4f}, MSGMSD: {rl_msgmsd:.6f}")
-    results.append(("Richardson-Lucy", elapsed, rl_psnr, rl_msssim, rl_fsim, rl_vif, rl_msgmsd))
-    tifffile.imwrite(str(output_dir / f"richardson_lucy.tif"), result.astype(np.float32))
-    show_image(result, title=f"Richardson-Lucy Deconvolution\nElapsed time: {elapsed:.2f} seconds")
+def _display_results(
+    ref_image: np.ndarray,
+    degraded: np.ndarray,
+    runs: list[dict[str, Any]],
+) -> None:
+    """Single tiled figure: reference + degraded + each algorithm output."""
+    n = len(runs) + 2
+    ncols = 4
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 4 * nrows))
+    axes = axes.ravel()
 
-    # Landweber deconvolution with unknown boundary conditions
-    solver = LandweberUnknownBoundary(degraded, psf_np, paddingMode="Reflect", padding_scale=2.0)
-    t0 = time.perf_counter()
-    result = solver.deblur(num_iter=250, lambda_tv=1e-3, precondition=True, adaptive_restart=True)
-    elapsed = time.perf_counter() - t0
-    print(f"Landweber Deconvolution completed in {elapsed:.2f} seconds.")
-    result = normalize_image(result)  # ensure result is in [0, 1] range
-    landweber_psnr, landweber_msssim, landweber_fsim, landweber_vif, landweber_msgmsd = image_quality_metrics(result, ref_image)
-    print(f"Landweber Deconvolution Quality:\n  PSNR: {landweber_psnr:.2f} dB\n  MS-SSIM: {landweber_msssim:.4f}, FSIM: {landweber_fsim:.4f}, VIF: {landweber_vif:.4f}, MSGMSD: {landweber_msgmsd:.6f}")
-    results.append(("Landweber", elapsed, landweber_psnr, landweber_msssim, landweber_fsim, landweber_vif, landweber_msgmsd))
-    tifffile.imwrite(str(output_dir / f"landweber.tif"), result.astype(np.float32))
-    show_image(result, title=f"Landweber Deconvolution\nElapsed time: {elapsed:.2f} seconds")
+    axes[0].imshow(ref_image, cmap="gray", vmin=0, vmax=1)
+    axes[0].set_title("Reference", fontsize=10, fontweight="bold")
+    axes[0].axis("off")
 
-    # ADMM with Total Variation regularisation
-    solver = ADMMDeconv(degraded, psf_np, paddingMode="Reflect", padding_scale=2.0)
-    t0 = time.perf_counter()
-    result = solver.deblur(num_iter=1500,  lambda_tv=8.9e-04, TVnorm=2)
-    elapsed = time.perf_counter() - t0
-    print(f"ADMM Deconvolution completed in {elapsed:.2f} seconds.")
-    result = normalize_image(result)  # ensure result is in [0, 1] range
-    admm_psnr, admm_msssim, admm_fsim, admm_vif, admm_msgmsd = image_quality_metrics(result, ref_image)
-    print(f"ADMM Deconvolution Quality:\n  PSNR: {admm_psnr:.2f} dB\n  MS-SSIM: {admm_msssim:.4f}, FSIM: {admm_fsim:.4f}, VIF: {admm_vif:.4f}, MSGMSD: {admm_msgmsd:.6f}")
-    results.append(("ADMM (TV)", elapsed, admm_psnr, admm_msssim, admm_fsim, admm_vif, admm_msgmsd))
-    tifffile.imwrite(str(output_dir / f"admm_tv.tif"), result.astype(np.float32))
-    show_image(result, title=f"ADMM Deconvolution (TV)\nElapsed time: {elapsed:.2f} seconds")
-
-    # TVAL3 (augmented-Lagrangian TV minimisation)
-    solver = TVAL3Deconv(degraded, psf_np, paddingMode="Reflect", padding_scale=2.0)
-    t0 = time.perf_counter()
-    result = solver.deblur(num_iter=1500, lambda_tv=6.0e-04, TVnorm=2, adaptive_tv=True, burn_in_frac=0.2)
-    elapsed = time.perf_counter() - t0
-    print(f"TVAL3 Deconvolution completed in {elapsed:.2f} seconds.")
-    result = normalize_image(result)  # ensure result is in [0, 1] range
-    tval3_psnr, tval3_msssim, tval3_fsim, tval3_vif, tval3_msgmsd = image_quality_metrics(result, ref_image)
-    print(f"TVAL3 Deconvolution Quality:\n  PSNR: {tval3_psnr:.2f} dB\n  MS-SSIM: {tval3_msssim:.4f}, FSIM: {tval3_fsim:.4f}, VIF: {tval3_vif:.4f}, MSGMSD: {tval3_msgmsd:.6f}")
-    results.append(("TVAL3", elapsed, tval3_psnr, tval3_msssim, tval3_fsim, tval3_vif, tval3_msgmsd))
-    tifffile.imwrite(str(output_dir / f"tval3_tv.tif"), result.astype(np.float32))
-    show_image(result, title=f"TVAL3 Deconvolution\nElapsed time: {elapsed:.2f} seconds")
-
-    # FISTA in TV-regularisation mode
-    solver = FISTADeconv(degraded, psf_np, paddingMode="Reflect", padding_scale=2.0)
-    t0 = time.perf_counter()
-    result = solver.deblur(num_iter=600, lambda_reg=6e-4, reg_mode="TV")
-    elapsed = time.perf_counter() - t0
-    print(f"FISTA Deconvolution completed in {elapsed:.2f} seconds.")
-    result = normalize_image(result)  # ensure result is in [0, 1] range
-    fista_psnr, fista_msssim, fista_fsim, fista_vif, fista_msgmsd = image_quality_metrics(result, ref_image)
-    print(f"FISTA Deconvolution Quality:\n  PSNR: {fista_psnr:.2f} dB\n  MS-SSIM: {fista_msssim:.4f}, FSIM: {fista_fsim:.4f}, VIF: {fista_vif:.4f}, MSGMSD: {fista_msgmsd:.6f}")
-    results.append(("FISTA (TV)", elapsed, fista_psnr, fista_msssim, fista_fsim, fista_vif, fista_msgmsd))
-    tifffile.imwrite(str(output_dir / f"fista_tv.tif"), result.astype(np.float32))
-    show_image(result, title=f"FISTA Deconvolution (TV)\nElapsed time: {elapsed:.2f} seconds")
-
-    # FISTA in L1-wavelet regularisation mode
-    solver = FISTADeconv(
-        degraded, psf_np,
-        wavelet="bior4.4",
-        wavelet_levels=4,
-        paddingMode="Reflect",
-        padding_scale=2.0,
+    deg_psnr, deg_msssim, *_ = image_quality_metrics(
+        normalize_image(degraded), ref_image
     )
-    t0 = time.perf_counter()
-    result = solver.deblur(num_iter=650, lambda_reg=8e-4, reg_mode="L1_wavelet")
-    elapsed = time.perf_counter() - t0
-    print(f"FISTA-L1-Wavelet Deconvolution completed in {elapsed:.2f} seconds.")
-    result = normalize_image(result)  # ensure result is in [0, 1] range
-    fista_wavelet_psnr, fista_wavelet_msssim, fista_wavelet_fsim, fista_wavelet_vif, fista_wavelet_msgmsd = image_quality_metrics(result, ref_image)
-    print(f"FISTA-L1-Wavelet Deconvolution Quality:\n  PSNR: {fista_wavelet_psnr:.2f} dB\n  MS-SSIM: {fista_wavelet_msssim:.4f}, FSIM: {fista_wavelet_fsim:.4f}, VIF: {fista_wavelet_vif:.4f}, MSGMSD: {fista_wavelet_msgmsd:.6f}")
-    results.append(("FISTA (L1-Wavelet)", elapsed, fista_wavelet_psnr, fista_wavelet_msssim, fista_wavelet_fsim, fista_wavelet_vif, fista_wavelet_msgmsd))
-    tifffile.imwrite(str(output_dir / f"fista_l1_wavelet.tif"), result.astype(np.float32))
-    show_image(result, title=f"FISTA Deconvolution (L1-Wavelet)\nElapsed time: {elapsed:.2f} seconds")
-
-    # Chambolle-Pock (Condat-Vũ) primal-dual algorithm in TV-regularisation mode
-    solver = ChambollePockDeconv(degraded, psf_np, paddingMode="Reflect", padding_scale=2.0)
-    t0 = time.perf_counter()
-    result = solver.deblur(num_iter=110, lambda_tv=0.00015)
-    elapsed = time.perf_counter() - t0
-    print(f"Chambolle-Pock Deconvolution completed in {elapsed:.2f} seconds.")
-    result = normalize_image(result)  # ensure result is in [0, 1] range
-    chambolle_pock_psnr, chambolle_pock_msssim, chambolle_pock_fsim, chambolle_pock_vif, chambolle_pock_msgmsd = image_quality_metrics(result, ref_image)
-    print(f"Chambolle-Pock Deconvolution Quality:\n  PSNR: {chambolle_pock_psnr:.2f} dB\n  MS-SSIM: {chambolle_pock_msssim:.4f}, FSIM: {chambolle_pock_fsim:.4f}, VIF: {chambolle_pock_vif:.4f}, MSGMSD: {chambolle_pock_msgmsd:.6f}")
-    results.append(("Chambolle-Pock", elapsed, chambolle_pock_psnr, chambolle_pock_msssim, chambolle_pock_fsim, chambolle_pock_vif, chambolle_pock_msgmsd))
-    tifffile.imwrite(str(output_dir / f"chambolle_pock_tv.tif"), result.astype(np.float32))
-    show_image(result, title=f"Chambolle-Pock Deconvolution (TV)\nElapsed time: {elapsed:.2f} seconds")
-
-    # Plug-and-Play ADMM with BM3D denoiser
-    solver = PnPADMM(
-        degraded, psf_np,
-        rho_z=0.5,
-        sigma_scale=0.1,
-        rho_v=1.0,
-        paddingMode="Reflect",
-        padding_scale=2.0,
+    axes[1].imshow(degraded, cmap="gray", vmin=0, vmax=1)
+    axes[1].set_title(
+        f"Degraded\nPSNR={deg_psnr:.2f} dB  MS-SSIM={deg_msssim:.3f}",
+        fontsize=9,
     )
-    t0 = time.perf_counter()
-    result = solver.deblur(num_iter=8, lambda_tv=0.002)
-    elapsed = time.perf_counter() - t0
-    print(f"Plug-and-Play ADMM Deconvolution completed in {elapsed:.2f} seconds.")
-    result = normalize_image(result)  # ensure result is in [0, 1] range
-    pnp_admm_psnr, pnp_admm_msssim, pnp_admm_fsim, pnp_admm_vif, pnp_admm_msgmsd = image_quality_metrics(result, ref_image)
-    print(f"Plug-and-Play ADMM Deconvolution Quality:\n  PSNR: {pnp_admm_psnr:.2f} dB\n  MS-SSIM: {pnp_admm_msssim:.4f}, FSIM: {pnp_admm_fsim:.4f}, VIF: {pnp_admm_vif:.4f}, MSGMSD: {pnp_admm_msgmsd:.6f}")
-    results.append(("PnP-ADMM (BM3D)", elapsed, pnp_admm_psnr, pnp_admm_msssim, pnp_admm_fsim, pnp_admm_vif, pnp_admm_msgmsd))
-    tifffile.imwrite(str(output_dir / f"pnp_admm_bm3d.tif"), result.astype(np.float32))
-    show_image(result, title=f"Plug-and-Play ADMM Deconvolution\nElapsed time: {elapsed:.2f} seconds")
+    axes[1].axis("off")
 
-    # RED-ADMM with BM3D denoiser
-    solver = REDDeconv(
-        degraded, psf_np,
-        sigma=0.005,          # closer to actual noise level
-        rho_v=0.5,
-        paddingMode="Reflect",
-        padding_scale=2.0,
+    for i, run in enumerate(runs):
+        ax = axes[i + 2]
+        ax.imshow(run["image"], cmap="gray", vmin=0, vmax=1)
+        ax.set_title(
+            f"{run['name']}\n"
+            f"PSNR={run['psnr']:.2f} dB  MS-SSIM={run['msssim']:.3f}\n"
+            f"({run['elapsed']:.2f} s)",
+            fontsize=8,
+        )
+        ax.axis("off")
+
+    for j in range(n, len(axes)):
+        axes[j].set_visible(False)
+
+    fig.suptitle(
+        "Reconstruction Comparison — Airy PSF (r=3.0), AWGN σ=0.01",
+        fontsize=12, fontweight="bold", y=1.0,
     )
-    t0 = time.perf_counter()
-    result = solver.deblur(num_iter=3, lambda_reg=0.0001)
-    elapsed = time.perf_counter() - t0
-    print(f"RED-ADMM Deconvolution completed in {elapsed:.2f} seconds.")
-    result = normalize_image(result)  # ensure result is in [0, 1] range
-    red_admm_psnr, red_admm_msssim, red_admm_fsim, red_admm_vif, red_admm_msgmsd = image_quality_metrics(result, ref_image)
-    print(f"RED-ADMM Deconvolution Quality:\n  PSNR: {red_admm_psnr:.2f} dB\n  MS-SSIM: {red_admm_msssim:.4f}, FSIM: {red_admm_fsim:.4f}, VIF: {red_admm_vif:.4f}, MSGMSD: {red_admm_msgmsd:.6f}")
-    results.append(("RED-ADMM (BM3D)", elapsed, red_admm_psnr, red_admm_msssim, red_admm_fsim, red_admm_vif, red_admm_msgmsd))
-    tifffile.imwrite(str(output_dir / f"red_admm_bm3d.tif"), result.astype(np.float32))
-    show_image(result, title=f"RED-ADMM Deconvolution\nElapsed time: {elapsed:.2f} seconds")
+    fig.tight_layout()
 
-    # Print and save results summary table
-    header = ("Method", "Elapsed (s)", "PSNR (dB)", "MS-SSIM", "FSIM", "VIF", "MSGMSD")
+
+def _display_alpha_trajectories(
+    runs: list[dict[str, Any]],
+) -> None:
+    """Separate small figure showing the Wiener α-optimisation trajectories.
+
+    This is the unique-to-this-demo feature compared to example.py: the
+    two Wiener variants invoke ``optimize_alpha`` to find the
+    metric-maximising α via a coarse grid plus Brent refinement.  Each
+    panel shows the metric values at the coarse grid points and marks
+    the final optimum.
+    """
+    wiener_runs = [r for r in runs if r["alpha_search"] is not None]
+    if not wiener_runs:
+        return
+    fig, axes = plt.subplots(1, len(wiener_runs), figsize=(5 * len(wiener_runs), 4),
+                              squeeze=False)
+    for ax, run in zip(axes[0], wiener_runs):
+        opt = run["alpha_search"]
+        ax.plot(opt.coarse_t, opt.coarse_ssim, "o-", label="coarse-grid metric",
+                markersize=3)
+        ax.axvline(opt.log10_alpha, color="red", linestyle="--",
+                   label=f"optimum at log10(α)={opt.log10_alpha:.3f}")
+        ax.set_xlabel(r"$\log_{10}(\alpha)$")
+        ax.set_ylabel("MS-SSIM")
+        ax.set_title(f"{run['name']}: α-search trajectory")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+
+
+def _print_summary_table(runs: list[dict[str, Any]]) -> None:
+    """Print the metric summary table to stdout."""
+    header = ("Method", "Elapsed (s)", "PSNR (dB)", "MS-SSIM",
+              "FSIM", "VIF", "MSGMSD")
     col_widths = (25, 12, 10, 10, 10, 10, 10)
-    fmt = f"{{:<{col_widths[0]}}} {{:>{col_widths[1]}}} {{:>{col_widths[2]}}} {{:>{col_widths[3]}}} {{:>{col_widths[4]}}} {{:>{col_widths[5]}}} {{:>{col_widths[6]}}}"
+    fmt = " ".join(f"{{:>{w}}}" if i else f"{{:<{w}}}"
+                   for i, w in enumerate(col_widths))
     sep = "-" * (sum(col_widths) + len(col_widths) - 1)
-
     print(f"\n{sep}")
     print(fmt.format(*header))
     print(sep)
-    for name, t, psnr, msssim, fsim, vif, msgmsd in results:
-        print(fmt.format(name, f"{t:.2f}", f"{psnr:.2f}", f"{msssim:.4f}", f"{fsim:.4f}", f"{vif:.4f}", f"{msgmsd:.6f}"))
+    for run in runs:
+        print(fmt.format(
+            run["name"],
+            f"{run['elapsed']:.2f}",
+            f"{run['psnr']:.2f}",
+            f"{run['msssim']:.4f}",
+            f"{run['fsim']:.4f}",
+            f"{run['vif']:.4f}",
+            f"{run['msgmsd']:.6f}",
+        ))
     print(sep)
 
-    csv_path = output_dir / "results.csv"
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        for name, t, psnr, msssim, fsim, vif, msgmsd in results:
-            writer.writerow([name, f"{t:.2f}", f"{psnr:.2f}", f"{msssim:.4f}", f"{fsim:.4f}", f"{vif:.4f}", f"{msgmsd:.6f}"])
-    print(f"\nResults saved to {csv_path}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Main
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+if __name__ == "__main__":
+    # ── 1. Synthetic input ─────────────────────────────────────────────────
+    logger.info("Loading 'camera' from skimage.data ...")
+    raw = ski.data.camera()
+    gray = image_normalization(to_grayscale(raw))
+    h, w = gray.shape
+    if h % 2 == 0:
+        h -= 1
+    if w % 2 == 0:
+        w -= 1
+    ref_image = odd_crop_around_center(gray, (h, w))
+    logger.info(
+        "Reference shape: %s, range [%.4f, %.4f]",
+        ref_image.shape, ref_image.min(), ref_image.max(),
+    )
+
+    psf = airy_psf(size=(35, 35), radius=3.0)
+    logger.info("PSF shape: %s, sum=%.6f", psf.shape, psf.sum())
+
+    # ── 2. Degrade ─────────────────────────────────────────────────────────
+    from scipy.signal import fftconvolve
+    blurred = fftconvolve(ref_image, psf, mode="same")
+    rng = np.random.default_rng(42)
+    degraded = blurred + rng.normal(0.0, 0.01, blurred.shape)
+    logger.info(
+        "Degraded image: PSNR=%.2f dB, MS-SSIM=%.4f vs reference",
+        *image_quality_metrics(normalize_image(degraded), ref_image)[:2],
+    )
+
+    # ── 3. Run all algorithm specs ─────────────────────────────────────────
+    if not _HAS_BM3D:
+        logger.warning(
+            "bm3d not installed; PnP-ADMM and RED-ADMM will be skipped."
+        )
+    runs: list[dict[str, Any]] = []
+    for spec in _ALGO_SPECS:
+        logger.info("Running %s ...", spec.name)
+        try:
+            run = _run_one_algorithm(
+                spec, degraded=degraded, ref_image=ref_image, psf=psf,
+            )
+            runs.append(run)
+            logger.info(
+                "  %-22s PSNR=%6.2f dB  MS-SSIM=%.4f  (%.2f s)",
+                run["name"], run["psnr"], run["msssim"], run["elapsed"],
+            )
+        except Exception as exc:
+            logger.error("  %-22s FAILED: %s", spec.name, exc)
+
+    # ── 4. Report ──────────────────────────────────────────────────────────
+    _print_summary_table(runs)
+    _display_results(ref_image, degraded, runs)
+    _display_alpha_trajectories(runs)
+    plt.show()
