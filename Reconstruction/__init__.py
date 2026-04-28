@@ -99,11 +99,10 @@ def _rewrite_import_error(symbol: str, exc: ImportError) -> ImportError:
             "pip install reconstruction[imaging] or pip install scikit-image"
         )
 
-    if missing.startswith(("RemondoPythonCore", "Shared")):
+    if missing.startswith("RemondoPythonCore"):
         return ImportError(
             "Reconstruction solver modules require the shared preprocessing "
-            "utilities from 'RemondoPythonCore.Common' (preferred) or "
-            "'Shared.Common' (legacy). Install/use the full "
+            "utilities from 'RemondoPythonCore.Common'. Install/use the full "
             "RemondoPythonCore package layout before importing solver modules."
         )
 

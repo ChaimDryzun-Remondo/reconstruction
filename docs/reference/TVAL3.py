@@ -1,13 +1,33 @@
 #  TVAL3 deconvolusion
+#
+#  Reference-code-only.  Preserved for inspection; not loaded by any test.
+#  External dependencies that previously came from the parallel ``Shared``
+#  codebase (``Shared.algo.Utilities`` and the ``use_cupy`` helper at
+#  ``Shared/__init__.py``) are stubbed below as ``NotImplementedError``-
+#  raising functions.  Anyone who tries to actually run this file gets an
+#  explicit error rather than silently degraded behaviour.
 from __future__ import annotations
 
 import importlib
 import numpy as np
 import os
 from typing import Optional, Literal
-from Shared.algo.Utilities import Padding, CropImage, AsNumpy
 
-from Shared import use_cupy
+
+def Padding(*args, **kwargs):
+    raise NotImplementedError("Reference code; Padding not implemented")
+
+
+def CropImage(*args, **kwargs):
+    raise NotImplementedError("Reference code; CropImage not implemented")
+
+
+def AsNumpy(*args, **kwargs):
+    raise NotImplementedError("Reference code; AsNumpy not implemented")
+
+
+def use_cupy(*args, **kwargs):
+    raise NotImplementedError("Reference code; use_cupy not implemented")
 
 # Try to import CuPy; fall back to NumPy if it is absent or if the caller
 # explicitly disables the GPU via an environment variable.

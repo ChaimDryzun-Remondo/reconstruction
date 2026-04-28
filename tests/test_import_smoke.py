@@ -225,17 +225,12 @@ class TestImportSmoke:
 
 class TestCommonImportContract:
 
-    def test_common_prefers_remondo_namespace_when_available(self):
+    def test_common_resolves_to_remondo_namespace(self):
         _clear_common_namespace_modules()
         remondo = _install_common_namespace(
             "RemondoPythonCore",
             odd_crop_in_general_utils=True,
             label="remondo",
-        )
-        shared = _install_common_namespace(
-            "Shared",
-            odd_crop_in_general_utils=False,
-            label="shared",
         )
 
         common = _import_fresh_common_module()
@@ -248,33 +243,6 @@ class TestCommonImportContract:
         assert common.image_normalization is remondo["image_normalization"]
         assert common.validate_image is remondo["validate_image"]
         assert common.to_grayscale is remondo["to_grayscale"]
-        assert common.padding is not shared["padding"]
-
-    def test_common_nested_import_failure_in_preferred_namespace_is_not_mislabeled(
-        self,
-        monkeypatch,
-    ):
-        _clear_common_namespace_modules()
-        _install_common_namespace(
-            "Shared",
-            odd_crop_in_general_utils=False,
-            label="shared",
-        )
-
-        original_import = builtins.__import__
-
-        def _failing_import(name, globals=None, locals=None, fromlist=(), level=0):
-            if name == "RemondoPythonCore.Common.General_Utilities":
-                raise ModuleNotFoundError(
-                    "No module named 'dependency_x'",
-                    name="dependency_x",
-                )
-            return original_import(name, globals, locals, fromlist, level)
-
-        monkeypatch.setattr(builtins, "__import__", _failing_import)
-
-        with pytest.raises(ImportError, match="dependency_x"):
-            _import_fresh_common_module()
 
     def test_root_symbol_import_preserves_nested_common_import_error(self, monkeypatch):
         _clear_reconstruction_modules()
