@@ -111,8 +111,8 @@ The four tests were rewritten (not deleted) to assert real properties
 of the current package layout.  See `tests/test_import_smoke.py` and
 `docs/README.md` (*Import entry point* section) for the record.
 
-Baseline (core-profile cold checkout on `audit-2025-q2`, Post-Sprint-4):
-**549 passed, 4 xfailed, 3 skipped, 27 deselected of 581 total tests, in ~17 s**.
+Baseline (core-profile cold checkout on `audit-2025-q2`, Post-Sprint-5):
+**548 passed, 1 xfailed, 3 skipped, 27 deselected of 577 total tests, in ~11 s**.
 
 The default invocation filters to the `core` profile via `pyproject.toml:38`'s
 `-m 'not imaging and not pnp and not monorepo'` addopts.  The 27 deselected
@@ -122,8 +122,15 @@ tests are split across three optional profiles: `imaging` (20 tests — needs
 Sprint 4 thread 3).  See `pyproject.toml:38–44` for the marker declarations
 and `docs/README.md:347–362` for the alternate invocations.
 
+The 1 xfailed is the T3.1 NaN-metric robustness test in
+`tests/test_optimize_alpha.py`.  The three Sprint 0 W6 `Shared.Common`
+fallback xfail tests were deleted in Sprint 5 item 2 alongside the fallback
+mechanism itself; the redundant `test_common_nested_import_failure_in_preferred_namespace_is_not_mislabeled`
+test was deleted in Sprint 5 item 3 alongside the `Shared.Common.*` mock
+removal in `tests/conftest.py`.
+
 Monorepo-profile baseline (run with `-m monorepo` from the parent monorepo
-environment): **3 passed, 2 skipped, 578 deselected, in ~3 s**.  The three
+environment): **3 passed, 2 skipped, 575 deselected, in ~3 s**.  The three
 passing tests are `test_optimize_alpha::test_optimize_alpha_default_metric_runs_to_completion`
 (Sprint 4 T3.1), `test_example_flow_smoke::test_example_flow_module_loads_cleanly`
 (Sprint 4 T3.2), and `test_example_smoke::test_example_module_loads_cleanly`
@@ -198,7 +205,69 @@ History:
     `tests/_remondopythoncore_bootstrap.py` and refactored T3.2's
     smoke test to use it; added one new Level-1 module-load smoke
     test at `tests/test_example_smoke.py`.
-- Submodule batch closeout commit (this commit; submodule SHA to be
-  recorded in the parent-repo commit message) updates this baseline line
-  to the Post-Sprint-4 state and appends the Sprint 1 and Sprint 4 entries
-  above.  No code changes; documentation alignment only.
+- Submodule batch closeout commit `e812d0c` updated this baseline line
+  to the Post-Sprint-4 state and appended the Sprint 1 and Sprint 4
+  entries above.  No code changes; documentation alignment only.
+- Sprint 5 (two submodule commits) advanced the gate to its
+  Post-Sprint-5 state by closing the F3 cleanup thread.  See parent
+  `docs/refactoring-audit/NOTES.md` Sprint 5 closeout entry for the
+  full sprint summary.  Submodule commits in order:
+  - `1c82b66` (Sprint 5 item 2) collapsed
+    `Reconstruction/_common.py` from a try/except fallback selector
+    to a direct import block from
+    `RemondoPythonCore.Common.{General_Utilities,PSF_Preprocessing,Image_Preprocessing}`,
+    and deleted the three xfail tests in
+    `tests/test_import_smoke.py` that Sprint 0 W6 had marked as
+    signposts for the Sprint 5 Q2 removal
+    (`test_common_falls_back_to_shared_namespace_when_remondo_absent`,
+    `test_common_missing_both_namespaces_raises_clear_error`,
+    `test_root_solver_symbol_requires_shared_preprocessing_namespace`).
+    Core profile gate moved
+    549 passed + 4 xfailed + 3 skipped + 27 deselected of 581 total
+    → 549 passed + 1 xfailed + 3 skipped + 27 deselected of 578
+    total.
+  - `a2fa88d` (Sprint 5 item 3) severed the submodule's remaining
+    dependence on the parallel `Shared` codebase.  Seven pieces:
+    `tests/conftest.py` deleted the `Shared.Common.*` mock stub
+    block (lines 162-187 of the pre-commit file);
+    `docs/reference/RL_Unknown_Boundary.py` and
+    `docs/reference/Landweber_Unknown_Boundary.py` rewrote three
+    `from Shared.Common.* import …` lines each to
+    `from RemondoPythonCore.Common.* import …`;
+    `docs/reference/TVAL3.py` (dead reference, no test loads it)
+    replaced its `Shared.algo.Utilities` and `Shared` imports with
+    local `NotImplementedError`-raising stubs;
+    `Reconstruction/__init__.py` simplified the
+    `_translate_import_error` message to drop the
+    `'(legacy) or Shared.Common'` qualifier;
+    `tests/_remondopythoncore_bootstrap.py` rewrote its docstring
+    to reframe the cache-pollution motivation accurately
+    (the `RemondoPythonCore.*` mocks remain; the helper logic
+    itself stays);
+    `tests/test_import_smoke.py` renamed
+    `test_common_prefers_remondo_namespace_when_available` →
+    `test_common_resolves_to_remondo_namespace` (dropping the
+    redundant `Shared` sentinel installation) and deleted
+    `test_common_nested_import_failure_in_preferred_namespace_is_not_mislabeled`
+    outright (Python's own ImportError propagation made the
+    assertion redundant; the third `TestCommonImportContract` test
+    covers the same scenario at the user entry point).  Core
+    profile gate moved
+    549 passed + 1 xfailed + 3 skipped + 27 deselected of 578 total
+    → 548 passed + 1 xfailed + 3 skipped + 27 deselected of 577 total.
+    The most significant finding from this commit (recorded in
+    parent `WORKPLAN.md` §8 Q2's Revised 2026-04-29 footnote and
+    parent `NOTES.md` Sprint 5 closeout entry) is that §8 Q2's
+    foundational premise — that `Shared.Common` was a symbolic
+    alias for `RemondoPythonCore.Common` — was incorrect.  `Shared`
+    is an independent sibling git repository at `c:/git/Shared/`
+    with parallel structure and drifted implementations; the
+    parent's `Tools/MC_image_analysis.py:57` migration was
+    therefore deferred to a dedicated cleanup pass.
+- Sprint 5 closeout (this commit) updates this baseline line to the
+  Post-Sprint-5 state and appends the Sprint 5 entries above.  No
+  code changes; documentation alignment only.  Future readers should
+  consult parent `docs/refactoring-audit/NOTES.md` Sprint 5 closeout
+  entry for the full sprint summary, including the
+  verification-refines-workplan pattern that emerged across items
+  1, 3, and 6.
