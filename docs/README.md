@@ -255,7 +255,7 @@ Reconstruction/
 └── pnp_admm.py                    Phase 5e — Plug-and-Play ADMM with BM3D
 
 tests/
-├── conftest.py                    Shared fixtures + Shared.Common mock stubs
+├── conftest.py                    Shared fixtures
 ├── test_backend.py                Phase 1 verification (31 tests)
 ├── test_tv_operators.py           Phase 2 verification (27 tests)
 ├── test_base.py                   Phase 3 verification (44 tests)
@@ -399,16 +399,16 @@ Current import contract:
   estimation reports missing `scikit-image`.
 - Accessing solver symbols such as `WienerDeconv` or `RLUnknownBoundary` still
   requires the shared preprocessing utilities at runtime from
-  `RemondoPythonCore.Common` (preferred) or `Shared.Common` (legacy). A plain
-  `import Reconstruction` does not guarantee that those solver modules are
-  importable in a standalone environment.
+  `RemondoPythonCore.Common`. A plain `import Reconstruction` does not
+  guarantee that those solver modules are importable in a standalone
+  environment.
 - Nested or transitive import failures inside an available shared-preprocessing
   namespace are preserved as their original `ImportError`; they are not
   relabeled as if the namespace were simply missing.
 - Most tests do not exercise the real runtime namespace layout directly:
-  `tests/conftest.py` installs mock `RemondoPythonCore.Common` /
-  `Shared.Common` modules, so the default test environment and a bare
-  standalone runtime are intentionally not identical.
+  `tests/conftest.py` installs mock `RemondoPythonCore.Common` modules,
+  so the default test environment and a bare standalone runtime are
+  intentionally not identical.
 
 The commit `0ead10c` renamed the submodule directory
 `reconstruction/` → `external_reconstruction/`, retiring the

@@ -111,7 +111,7 @@ The four tests were rewritten (not deleted) to assert real properties
 of the current package layout.  See `tests/test_import_smoke.py` and
 `docs/README.md` (*Import entry point* section) for the record.
 
-Baseline (core-profile cold checkout on `audit-2025-q2`, Post-Sprint-5):
+Baseline (core-profile cold checkout on `audit-2025-q2`, Post-Sprint-6):
 **548 passed, 1 xfailed, 3 skipped, 27 deselected of 577 total tests, in ~11 s**.
 
 The default invocation filters to the `core` profile via `pyproject.toml:38`'s
@@ -264,10 +264,23 @@ History:
     with parallel structure and drifted implementations; the
     parent's `Tools/MC_image_analysis.py:57` migration was
     therefore deferred to a dedicated cleanup pass.
-- Sprint 5 closeout (this commit) updates this baseline line to the
-  Post-Sprint-5 state and appends the Sprint 5 entries above.  No
-  code changes; documentation alignment only.  Future readers should
-  consult parent `docs/refactoring-audit/NOTES.md` Sprint 5 closeout
-  entry for the full sprint summary, including the
-  verification-refines-workplan pattern that emerged across items
-  1, 3, and 6.
+- Sprint 5 closeout (submodule commit `a2fa88d`'s parent counterpart)
+  updated this baseline line to the Post-Sprint-5 state and appended
+  the Sprint 5 entries above.  No code changes; documentation
+  alignment only.  Future readers should consult parent
+  `docs/refactoring-audit/NOTES.md` Sprint 5 closeout entry for the
+  full sprint summary, including the verification-refines-workplan
+  pattern that emerged across items 1, 3, and 6.
+- Sprint 6 was parent-side: bug-fix commits, Common package test
+  coverage, Tools migration cleanup, and the parent housekeeping
+  that bundled README Status updates plus deferred follow-ups.  The
+  submodule's only Sprint 6 work is this Thread 4 commit (Sprint 6
+  T4.2): three Shared.Common references stripped from
+  `docs/README.md` (lines 258, 402–404, 408–411 pre-edit) — the
+  conftest mock-stub line, the import-entry-point legacy-namespace
+  qualifier, and the test-environment mock-installation note —
+  plus this baseline-citation update from Post-Sprint-5 to
+  Post-Sprint-6.  The core-profile baseline numbers themselves are
+  unchanged because the submodule code did not move; the relabeling
+  is the closeout marker.  See parent `docs/refactoring-audit/NOTES.md`
+  Sprint 6 closeout entry (forthcoming) for the full sprint summary.
