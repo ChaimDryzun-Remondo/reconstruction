@@ -4,9 +4,7 @@ Shared fixtures for Reconstruction package tests.
 Provides:
   - Synthetic test images and PSFs.
   - Mock/stub implementations of RemondoPythonCore.Common utilities so tests
-    can run without the broader project installed.  Shared.Common stubs are
-    also installed for compatibility with the docs/reference/*.py regression
-    tests (which still import from that namespace).
+    can run without the broader project installed.
 """
 
 from __future__ import annotations
@@ -18,7 +16,7 @@ import pytest
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Mock RemondoPythonCore.Common / Shared.Common Utilities
+# Mock RemondoPythonCore.Common Utilities
 # ═══════════════════════════════════════════════════════════════════════════
 # The Reconstruction package imports from RemondoPythonCore.Common, which
 # lives outside this repo.  These stubs replicate the minimal behaviour
@@ -128,10 +126,9 @@ def _mock_odd_crop_around_center(image: np.ndarray,
 def _install_mocks() -> None:
     """Inject mock modules into sys.modules before any Reconstruction imports.
 
-    Each namespace is guarded independently so that whichever is already
-    provided by the real project is left untouched while the other is mocked.
+    The mocks are guarded so that the real project is left untouched when
+    it is already importable (e.g. under the monorepo profile).
     """
-    # ── RemondoPythonCore.Common.* (primary import path in _base.py) ──────
     if "RemondoPythonCore.Common.General_Utilities" not in sys.modules:
         rpc = types.ModuleType("RemondoPythonCore")
         rpc.__path__ = []
@@ -158,33 +155,6 @@ def _install_mocks() -> None:
         sys.modules["RemondoPythonCore.Common.General_Utilities"] = rpc_gen_utils
         sys.modules["RemondoPythonCore.Common.PSF_Preprocessing"] = rpc_psf_pre
         sys.modules["RemondoPythonCore.Common.Image_Preprocessing"] = rpc_img_pre
-
-    # ── Shared.Common.* (needed by docs/reference/*.py regression tests) ──
-    if "Shared.Common.General_Utilities" not in sys.modules:
-        shared = types.ModuleType("Shared")
-        shared.__path__ = []
-        s_common = types.ModuleType("Shared.Common")
-        s_common.__path__ = []
-
-        s_gen = types.ModuleType("Shared.Common.General_Utilities")
-        s_gen.padding = _mock_padding
-        s_gen.cropping = _mock_cropping
-
-        s_psf = types.ModuleType("Shared.Common.PSF_Preprocessing")
-        s_psf.psf_preprocess = _mock_psf_preprocess
-        s_psf.condition_psf = _mock_condition_psf
-
-        s_img = types.ModuleType("Shared.Common.Image_Preprocessing")
-        s_img.image_normalization = _mock_image_normalization
-        s_img.validate_image = _mock_validate_image
-        s_img.to_grayscale = _mock_to_grayscale
-        s_img.odd_crop_around_center = _mock_odd_crop_around_center
-
-        sys.modules["Shared"] = shared
-        sys.modules["Shared.Common"] = s_common
-        sys.modules["Shared.Common.General_Utilities"] = s_gen
-        sys.modules["Shared.Common.PSF_Preprocessing"] = s_psf
-        sys.modules["Shared.Common.Image_Preprocessing"] = s_img
 
 
 # Install mocks at import time (before any Reconstruction imports).

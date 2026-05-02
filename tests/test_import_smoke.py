@@ -225,17 +225,12 @@ class TestImportSmoke:
 
 class TestCommonImportContract:
 
-    def test_common_prefers_remondo_namespace_when_available(self):
+    def test_common_resolves_to_remondo_namespace(self):
         _clear_common_namespace_modules()
         remondo = _install_common_namespace(
             "RemondoPythonCore",
             odd_crop_in_general_utils=True,
             label="remondo",
-        )
-        shared = _install_common_namespace(
-            "Shared",
-            odd_crop_in_general_utils=False,
-            label="shared",
         )
 
         common = _import_fresh_common_module()
@@ -248,70 +243,6 @@ class TestCommonImportContract:
         assert common.image_normalization is remondo["image_normalization"]
         assert common.validate_image is remondo["validate_image"]
         assert common.to_grayscale is remondo["to_grayscale"]
-        assert common.padding is not shared["padding"]
-
-    @pytest.mark.xfail(reason="Sprint 5 Q2 — fallback mechanism pending removal; see WORKPLAN.md §8 Q2")
-    def test_common_falls_back_to_shared_namespace_when_remondo_absent(self):
-        _clear_common_namespace_modules()
-        shared = _install_common_namespace(
-            "Shared",
-            odd_crop_in_general_utils=False,
-            label="shared",
-        )
-
-        common = _import_fresh_common_module()
-
-        assert common.padding is shared["padding"]
-        assert common.cropping is shared["cropping"]
-        assert common.odd_crop_around_center is shared["odd_crop_around_center"]
-        assert common.psf_preprocess is shared["psf_preprocess"]
-        assert common.condition_psf is shared["condition_psf"]
-        assert common.image_normalization is shared["image_normalization"]
-        assert common.validate_image is shared["validate_image"]
-        assert common.to_grayscale is shared["to_grayscale"]
-
-    @pytest.mark.xfail(reason="Sprint 5 Q2 — fallback mechanism pending removal; see WORKPLAN.md §8 Q2")
-    def test_common_missing_both_namespaces_raises_clear_error(self):
-        _clear_common_namespace_modules()
-
-        with pytest.raises(ImportError, match="shared preprocessing utilities"):
-            _import_fresh_common_module()
-
-    @pytest.mark.xfail(reason="Sprint 5 Q2 — fallback mechanism pending removal; see WORKPLAN.md §8 Q2")
-    def test_root_solver_symbol_requires_shared_preprocessing_namespace(self):
-        _clear_reconstruction_modules()
-        _clear_common_namespace_modules()
-
-        pkg = importlib.import_module("Reconstruction")
-
-        with pytest.raises(ImportError, match="shared preprocessing utilities"):
-            getattr(pkg, "WienerDeconv")
-
-    def test_common_nested_import_failure_in_preferred_namespace_is_not_mislabeled(
-        self,
-        monkeypatch,
-    ):
-        _clear_common_namespace_modules()
-        _install_common_namespace(
-            "Shared",
-            odd_crop_in_general_utils=False,
-            label="shared",
-        )
-
-        original_import = builtins.__import__
-
-        def _failing_import(name, globals=None, locals=None, fromlist=(), level=0):
-            if name == "RemondoPythonCore.Common.General_Utilities":
-                raise ModuleNotFoundError(
-                    "No module named 'dependency_x'",
-                    name="dependency_x",
-                )
-            return original_import(name, globals, locals, fromlist, level)
-
-        monkeypatch.setattr(builtins, "__import__", _failing_import)
-
-        with pytest.raises(ImportError, match="dependency_x"):
-            _import_fresh_common_module()
 
     def test_root_symbol_import_preserves_nested_common_import_error(self, monkeypatch):
         _clear_reconstruction_modules()

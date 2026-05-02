@@ -2,12 +2,18 @@
 from ``RemondoPythonCore.Common.*`` and
 ``RemondoPythonCore.external_reconstruction.*``.
 
-The submodule's pytest does not have ``c:/git/`` (the parent of
-``RemondoPythonCore/``) on its python path, and the ``conftest.py``'s
-Sprint 0 W6 ``Shared.Common`` mocks transitively cache an empty-path
-namespace package for ``RemondoPythonCore`` in ``sys.modules``.  Either
-condition individually would block a real ``RemondoPythonCore.Common.*``
-import from succeeding.
+Two conditions, each individually sufficient, would block a real
+``RemondoPythonCore.Common.*`` import from succeeding under the
+submodule's pytest:
+
+1. The submodule's pytest does not have ``c:/git/`` (the parent of
+   ``RemondoPythonCore/``) on its python path.
+2. The ``conftest.py`` ``RemondoPythonCore.*`` mock installation
+   (lines that begin at the ``_install_mocks`` definition) populates
+   empty-path namespace stubs in ``sys.modules`` so that the standalone
+   core profile can run without the parent monorepo.  The same stubs
+   pollute ``sys.modules`` for the monorepo-profile smoke tests that
+   want the real package.
 
 Sprint 4 thread 3 introduces two smoke tests
 (``test_example_flow_smoke.py`` and ``test_example_smoke.py``) that
@@ -15,11 +21,11 @@ need to load demo scripts via ``importlib.util.spec_from_file_location``.
 This helper centralises the bootstrap they need so the cleanup logic
 is not duplicated across the two callers.
 
-See ``docs/refactoring-audit/NOTES.md`` Sprint 4 / closeout entry for
-the connection to Sprint 5's F3 fallback removal: once the
-``Shared.Common`` fallback mechanism is removed, the conftest mocks
-that motivate this bootstrap may also be removable, at which point
-this helper could be retired.
+Sprint 5 item 3 removed the ``Shared.Common.*`` mock siblings that the
+original docstring named as the cache-pollution source.  The motivating
+``RemondoPythonCore.*`` mocks remain in place — they are required by
+the standalone core profile — so this helper continues to be required
+even after the ``Shared.Common`` cleanup.
 """
 from __future__ import annotations
 
