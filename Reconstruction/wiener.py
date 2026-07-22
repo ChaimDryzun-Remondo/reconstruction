@@ -316,7 +316,7 @@ class WienerDeconv(DeconvBase):
             ) from exc
 
         gray_np = backend._to_numpy(self.gray)
-        return float(estimate_sigma(gray_np, channel_axis=None, average_sigmas=True))
+        return 1.5*float(estimate_sigma(gray_np, channel_axis=None, average_sigmas=True))
 
     # ── Auto alpha for Tikhonov mode ───────────────────────────────────────
 
